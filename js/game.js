@@ -61,15 +61,77 @@ for (const k in SITES) {
   m.rotation.x = -Math.PI / 2; m.position.set(s.x, .03, s.z); scene.add(m);
 }
 
+// ---------------- gun models ----------------
+// Builds a small group of primitives per weapon id, giving each a distinct silhouette.
+// Convention: forward (muzzle) is -Z, origin sits roughly at the grip, matching the
+// old single-box viewmodel so tracers/flash/hand positions still line up.
+const metal = 0x161616, dark = 0x101010, wood = 0x5a3a1e;
+function gBox(w, h, d, c) { return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color: c })); }
+function gCyl(r, h, c) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 10), new THREE.MeshLambertMaterial({ color: c }));
+  m.rotation.x = Math.PI / 2; return m;
+}
+function buildGun(wid) {
+  const w = W[wid], col = w.col, g = new THREE.Group();
+  const add = (mesh, x, y, z, rx = 0) => { mesh.position.set(x, y, z); mesh.rotation.x = rx; g.add(mesh); return mesh; };
+  switch (wid) {
+    case 'knife':
+      add(gBox(.03, .04, .26, 0xd8d8d8), 0, .01, -.17);
+      add(gBox(.035, .045, .13), 0, 0, .04, 0).material.color.setHex(0x3a3a3a);
+      break;
+    case 'pistol':
+      add(gBox(.055, .07, .18, col), 0, .03, -.09);
+      add(gBox(.02, .02, .05, metal), 0, .03, -.21);
+      add(gBox(.045, .12, .06, dark), 0, -.065, .03, .16);
+      break;
+    case 'deagle':
+      add(gBox(.065, .08, .24, col), 0, .035, -.1);
+      add(gBox(.02, .02, .05, metal), 0, .08, -.09);
+      add(gBox(.025, .025, .06, metal), 0, .035, -.25);
+      add(gBox(.05, .14, .07, dark), 0, -.075, .05, .14);
+      break;
+    case 'smg':
+      add(gBox(.06, .08, .3, col), 0, .02, -.1);
+      add(gBox(.035, .14, .05, dark), 0, -.08, -.05, -.25);
+      add(gBox(.03, .04, .18, dark), 0, .02, .2);
+      add(gBox(.035, .1, .05, dark), 0, -.07, .08, .2);
+      add(gBox(.03, .05, .03, dark), 0, -.05, -.22);
+      break;
+    case 'shotgun':
+      add(gCyl(.02, .42, metal), 0, .03, -.25);
+      add(gBox(.06, .05, .14, wood), 0, -.01, -.3);
+      add(gBox(.06, .08, .2, col), 0, .02, 0);
+      add(gBox(.045, .08, .22, wood), 0, -.01, .2, .1);
+      break;
+    case 'rifle':
+      add(gCyl(.014, .3, metal), 0, .03, -.32);
+      add(gBox(.06, .09, .4, col), 0, .02, -.05);
+      add(gBox(.045, .22, .06, dark), 0, -.14, -.05, -.3);
+      add(gBox(.035, .05, .2, col), 0, 0, .25);
+      add(gBox(.015, .04, .015, metal), 0, .09, -.3);
+      add(gBox(.02, .02, .03, metal), 0, .08, .02);
+      break;
+    case 'awp':
+      add(gCyl(.016, .5, metal), 0, .02, -.37);
+      add(gBox(.06, .08, .45, col), 0, .02, -.02);
+      add(gCyl(.03, .22, 0x0a0a0a), 0, .11, -.1);
+      add(gBox(.045, .09, .3, wood), 0, -.01, .3, .07);
+      add(gBox(.035, .1, .05, dark), 0, -.09, -.05);
+      break;
+  }
+  return g;
+}
+
 // viewmodel
 const vm = new THREE.Group(); cam.add(vm); vm.position.set(.22, -.2, -.5);
-const vmBody = new THREE.Mesh(new THREE.BoxGeometry(.06, .09, .5), new THREE.MeshLambertMaterial({ color: 0x333333 })); vm.add(vmBody);
+let vmGun = null;
 const vmHand = new THREE.Mesh(new THREE.BoxGeometry(.08, .08, .12), new THREE.MeshLambertMaterial({ color: 0xe0b890 })); vmHand.position.set(0, -.07, .08); vm.add(vmHand);
 const flash = new THREE.Mesh(new THREE.BoxGeometry(.09, .09, .06), new THREE.MeshBasicMaterial({ color: 0xffdd66 })); flash.visible = false; vm.add(flash);
 function setVM(wid) {
-  const w = W[wid]; vmBody.material.color.setHex(w.col);
-  vmBody.scale.set(wid === 'knife' ? .35 : 1, wid === 'knife' ? 1.4 : 1, w.len / .5);
-  vmBody.position.z = -w.len / 2 + .15; flash.position.z = -w.len - .02 + .15;
+  const w = W[wid];
+  if (vmGun) vm.remove(vmGun);
+  vmGun = buildGun(wid); vm.add(vmGun);
+  flash.position.z = -w.len - .02 + .15;
 }
 
 // player models
@@ -84,8 +146,17 @@ function makeModel(p) {
   g.userData.legL = leg(-.13); g.userData.legR = leg(.13);
   const arm = bx(.14, .5, .14, col); arm.position.set(.3, 1.15, -.15); arm.rotation.x = -1.1; g.add(arm);
   const arm2 = bx(.14, .5, .14, col); arm2.position.set(-.28, 1.15, -.2); arm2.rotation.x = -1.1; g.add(arm2);
-  const gun = bx(.07, .1, .55, 0x222222); gun.position.set(.22, 1.18, -.5); g.add(gun);
+  const gunMount = new THREE.Group(); gunMount.position.set(.22, 1.18, -.5); g.add(gunMount);
+  g.userData.gunMount = gunMount; g.userData.gunWid = null;
   return g;
+}
+function syncGun(e, wid) {
+  wid = wid || 'pistol';
+  if (e.wid === wid) return;
+  e.wid = wid;
+  const mount = e.g.userData.gunMount;
+  while (mount.children.length) mount.remove(mount.children[0]);
+  mount.add(buildGun(wid));
 }
 function makeTag(text) {
   const c = document.createElement('canvas'); c.width = 256; c.height = 64; const x = c.getContext('2d');
@@ -340,6 +411,7 @@ function syncEnts(dt) {
     const sw = p.alive ? Math.sin(e.ph) * Math.min(sp / 4, 1) * .7 : 0;
     e.g.userData.legL.rotation.x = sw; e.g.userData.legR.rotation.x = -sw;
     e.g.position.set(e.x, e.y, e.z); e.g.rotation.y = p.yaw;
+    syncGun(e, p.w);
     if (p.alive) { e.g.rotation.x = 0; e.g.scale.y = p.crouch ? .75 : 1; }
     else { e.g.rotation.x = -1.5; e.g.position.y = e.y + .2; e.g.scale.y = 1; }
   }
