@@ -15,56 +15,64 @@ function B(x, y, z, w, h, d, c = 0) {
   return { x, y, z, w, h, d, c, x0: x - w / 2, x1: x + w / 2, y0: y, y1: y + h, z0: z - d / 2, z1: z + d / 2 };
 }
 // c: 0 = wall, 1 = crate
-// Layout inspired by the classic bomb-defusal "two sites, three lanes" flow:
-// T spawn (south) feeds a Long lane (east, to A), a Mid lane (center, branching
-// to Catwalk->A and Tunnels->B), and an open west flank straight to B. CT spawn
-// sits north-center between both sites.
+// Layout follows the classic bomb-defusal flow more closely than a plain
+// three-lane split: Long and the outside flank run straight from T spawn to
+// their sites, independent of mid. Mid instead funnels through a narrow
+// choke ("Suicide") into an open plaza, which has its own shortcut into the
+// Tunnels lane ("Mid doors") rather than connecting straight across; Tunnels
+// then merges with the outside flank before reaching B, same as the real
+// lower-tunnel/outside-tunnel merge. Catwalk and Long are never
+// interconnected mid-route, only at the open area past CT spawn.
 export const BOXES = [
   // outer walls
   B(0, 0, -30.5, 62, 6, 1), B(0, 0, 30.5, 62, 6, 1), B(-30.5, 0, 0, 1, 6, 62), B(30.5, 0, 0, 1, 6, 62),
 
-  // Long lane wall (east flank, T spawn up to site A)
-  B(11, 0, -2, 1, 4, 36),
-  // West flank wall (T spawn up to site B)
-  B(-11, 0, -2, 1, 4, 36),
+  // Long lane wall (direct T spawn -> site A, independent of mid)
+  B(17, 0, -1, 1, 4, 38),
+  // Outside-flank wall (direct T spawn -> site B), split to merge with Tunnels before the site
+  B(-17, 0, 5, 1, 4, 26), B(-17, 0, -17, 1, 4, 6),
 
-  // Mid lane walls, each split to leave a side-door through to Catwalk (east) / Tunnels (west)
-  B(4, 0, 7, 1, 4, 18), B(4, 0, -11, 1, 4, 14),
-  B(-4, 0, 7, 1, 4, 18), B(-4, 0, -11, 1, 4, 14),
+  // Mid / Catwalk divider (no mid-route crossing - only meets Catwalk past CT spawn)
+  B(10, 0, -7, 1, 4, 26),
+  // Mid / Tunnels divider, split to leave the "Mid doors" shortcut through to Tunnels
+  B(-10, 0, -16, 1, 4, 8), B(-10, 0, 0, 1, 4, 12),
+
+  // Solid mass flanking the Suicide choke (forces T spawn -> mid through the narrow gap)
+  B(9.5, 0, 12, 15, 4, 12), B(-9.5, 0, 12, 15, 4, 12),
 
   // T spawn cover
   B(-8, 0, 22, 2, 1.6, 2, 1), B(8, 0, 22, 2, 1.6, 2, 1), B(2, 0, 27, 3, 1.2, 2, 1),
 
   // Long lane cover
-  B(20, 0, 6, 3, 1.6, 3, 1), B(20, 0, -6, 3, 1.6, 3, 1), B(23, 0, -14, 2, 1.2, 2, 1),
+  B(22, 0, 8, 3, 1.6, 3, 1), B(22, 0, -6, 3, 1.6, 3, 1), B(26, 0, -14, 2, 1.2, 2, 1),
 
-  // Mid cover
-  B(0, 0, 2, 2, 1.2, 2, 1),
+  // Mid plaza cover
+  B(0, 0, 0, 2, 1.2, 2, 1),
   // Catwalk cover (toward A)
-  B(7, 0, -15, 2, 1.2, 2, 1),
+  B(13, 0, -15, 2, 1.2, 2, 1),
   // Tunnels cover (toward B)
-  B(-7, 0, -15, 2, 1.2, 2, 1),
+  B(-13, 0, -15, 2, 1.2, 2, 1),
 
   // CT spawn back cover
   B(0, 0, -29.5, 2, 1.2, 1, 1),
 
   // Site A cover
-  B(17, 0, -22, 2, 1.6, 2, 1), B(23, 0, -17, 2, 1.6, 2, 1),
+  B(19, 0, -24, 2, 1.6, 2, 1), B(25, 0, -19, 2, 1.6, 2, 1),
   // Site B cover
-  B(-17, 0, -22, 2, 1.6, 2, 1), B(-23, 0, -17, 2, 1.6, 2, 1),
+  B(-19, 0, -24, 2, 1.6, 2, 1), B(-25, 0, -19, 2, 1.6, 2, 1),
 ];
 
-export const SITES = { A: { x: 20, z: -20, r: 6 }, B: { x: -20, z: -20, r: 6 } };
+export const SITES = { A: { x: 22, z: -22, r: 6 }, B: { x: -22, z: -22, r: 6 } };
 const row = (z, yaw) => [-8, -4, 0, 4, 8].map(x => [x, z, yaw]);
 export const SPAWNS = {
   T: [...row(26, 0), ...row(28, 0)],
   CT: [...row(-26, Math.PI), ...row(-28, Math.PI)],
 };
 export const ROUTES = {
-  A: [[20, 22], [20, 8], [20, -4], [20, -14], [20, -20]],
-  B: [[-20, 22], [-20, 8], [-20, -4], [-20, -14], [-20, -20]],
+  A: [[24, 22], [24, 8], [24, -6], [24, -14], [22, -22]],
+  B: [[-24, 22], [-24, 8], [-24, -6], [-24, -14], [-22, -22]],
 };
-export const HOLDS = { A: [[16, -18]], B: [[-16, -18]], M: [[0, -18]] };
+export const HOLDS = { A: [[20, -18]], B: [[-20, -18]], M: [[0, -18]] };
 
 export function inSite(p) {
   for (const k in SITES) { const s = SITES[k]; if (Math.hypot(p.x - s.x, p.z - s.z) <= s.r) return k; }
