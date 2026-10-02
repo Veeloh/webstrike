@@ -15,36 +15,56 @@ function B(x, y, z, w, h, d, c = 0) {
   return { x, y, z, w, h, d, c, x0: x - w / 2, x1: x + w / 2, y0: y, y1: y + h, z0: z - d / 2, z1: z + d / 2 };
 }
 // c: 0 = wall, 1 = crate
+// Layout inspired by the classic bomb-defusal "two sites, three lanes" flow:
+// T spawn (south) feeds a Long lane (east, to A), a Mid lane (center, branching
+// to Catwalk->A and Tunnels->B), and an open west flank straight to B. CT spawn
+// sits north-center between both sites.
 export const BOXES = [
   // outer walls
   B(0, 0, -30.5, 62, 6, 1), B(0, 0, 30.5, 62, 6, 1), B(-30.5, 0, 0, 1, 6, 62), B(30.5, 0, 0, 1, 6, 62),
-  // mid divider (gaps at x -10..-4 and 4..10)
-  B(-20, 0, 0, 20, 4, 1), B(0, 0, 0, 8, 4, 1), B(20, 0, 0, 20, 4, 1),
-  // CT-side wall (gaps at x -14..-6 and 6..14)
-  B(-22, 0, -12, 16, 4, 1), B(0, 0, -12, 12, 4, 1), B(22, 0, -12, 16, 4, 1),
-  // wall in front of CT spawn
-  B(0, 0, -19, 8, 3, 1),
-  // T side cover
-  B(-18, 0, 10, 3, 1.6, 3, 1), B(18, 0, 10, 3, 1.6, 3, 1), B(0, 0, 16, 4, 1.2, 2, 1),
-  B(-11, 0, 20, 2, 1.6, 2, 1), B(11, 0, 20, 2, 1.6, 2, 1),
-  // mid
-  B(-16, 0, -6, 3, 1.6, 3, 1), B(16, 0, -6, 3, 1.6, 3, 1), B(0, 0, -6, 2, 4, 2),
-  // site A / B cover
-  B(-23, 0, -22.5, 3, 2, 3, 1), B(-16.5, 0, -16, 2, 1.2, 2, 1),
-  B(23, 0, -22.5, 3, 2, 3, 1), B(16.5, 0, -16, 2, 1.2, 2, 1),
+
+  // Long lane wall (east flank, T spawn up to site A)
+  B(11, 0, -2, 1, 4, 36),
+  // West flank wall (T spawn up to site B)
+  B(-11, 0, -2, 1, 4, 36),
+
+  // Mid lane walls, each split to leave a side-door through to Catwalk (east) / Tunnels (west)
+  B(4, 0, 7, 1, 4, 18), B(4, 0, -11, 1, 4, 14),
+  B(-4, 0, 7, 1, 4, 18), B(-4, 0, -11, 1, 4, 14),
+
+  // T spawn cover
+  B(-8, 0, 22, 2, 1.6, 2, 1), B(8, 0, 22, 2, 1.6, 2, 1), B(2, 0, 27, 3, 1.2, 2, 1),
+
+  // Long lane cover
+  B(20, 0, 6, 3, 1.6, 3, 1), B(20, 0, -6, 3, 1.6, 3, 1), B(23, 0, -14, 2, 1.2, 2, 1),
+
+  // Mid cover
+  B(0, 0, 2, 2, 1.2, 2, 1),
+  // Catwalk cover (toward A)
+  B(7, 0, -15, 2, 1.2, 2, 1),
+  // Tunnels cover (toward B)
+  B(-7, 0, -15, 2, 1.2, 2, 1),
+
+  // CT spawn back cover
+  B(0, 0, -29.5, 2, 1.2, 1, 1),
+
+  // Site A cover
+  B(17, 0, -22, 2, 1.6, 2, 1), B(23, 0, -17, 2, 1.6, 2, 1),
+  // Site B cover
+  B(-17, 0, -22, 2, 1.6, 2, 1), B(-23, 0, -17, 2, 1.6, 2, 1),
 ];
 
-export const SITES = { A: { x: -20, z: -19, r: 5 }, B: { x: 20, z: -19, r: 5 } };
+export const SITES = { A: { x: 20, z: -20, r: 6 }, B: { x: -20, z: -20, r: 6 } };
 const row = (z, yaw) => [-8, -4, 0, 4, 8].map(x => [x, z, yaw]);
 export const SPAWNS = {
   T: [...row(26, 0), ...row(28, 0)],
   CT: [...row(-26, Math.PI), ...row(-28, Math.PI)],
 };
 export const ROUTES = {
-  A: [[-7, 18], [-7, 3], [-10, -8], [-10, -15], [-20, -19]],
-  B: [[7, 18], [7, 3], [10, -8], [10, -15], [20, -19]],
+  A: [[20, 22], [20, 8], [20, -4], [20, -14], [20, -20]],
+  B: [[-20, 22], [-20, 8], [-20, -4], [-20, -14], [-20, -20]],
 };
-export const HOLDS = { A: [[-9, -15]], B: [[9, -15]], M: [[0, -15]] };
+export const HOLDS = { A: [[16, -18]], B: [[-16, -18]], M: [[0, -18]] };
 
 export function inSite(p) {
   for (const k in SITES) { const s = SITES[k]; if (Math.hypot(p.x - s.x, p.z - s.z) <= s.r) return k; }
