@@ -1,0 +1,8 @@
+{
+  "name": "webstrike",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-based tactical 5v5 bomb defusal shooter",
+  "scripts": { "start": "node server/server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

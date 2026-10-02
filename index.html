@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WEBSTRIKE</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+<div id="menu">
+  <div class="card">
+    <h1>WEB<span>STRIKE</span></h1>
+    <p class="sub">Tactical 5v5 bomb defusal, right in your browser</p>
+    <label>Name <input id="name" maxlength="16" placeholder="Player"></label>
+    <div class="row">
+      <label>Team <select id="team"><option value="CT">Counter-Terrorist</option><option value="T">Terrorist</option></select></label>
+      <label>Players per team <select id="size"><option>2</option><option>3</option><option>4</option><option selected>5</option></select></label>
+    </div>
+    <button id="btnSolo" class="big">▶ Play vs Bots</button>
+
+    <h3>Online (peer-to-peer, works on GitHub Pages)</h3>
+    <div class="row">
+      <input id="code" maxlength="8" placeholder="Room code">
+      <button id="btnHost">Host</button>
+      <button id="btnJoin">Join</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="fill" checked> Fill empty slots with bots (when hosting)</label>
+
+    <h3>Dedicated server on a PC</h3>
+    <div class="row">
+      <input id="srv" placeholder="ws://192.168.1.10:8080">
+      <button id="btnSrv">Join server</button>
+    </div>
+
+    <div id="status"></div>
+
+    <details>
+      <summary>Controls &amp; settings</summary>
+      <p class="help">
+        <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> fire · <b>RMB</b> scope (sniper) · <b>Space</b> jump · <b>Shift</b> walk · <b>C</b> crouch<br>
+        <b>R</b> reload · <b>1/2/3</b> primary/secondary/knife · <b>B</b> buy menu · <b>Tab</b> scoreboard<br>
+        <b>Hold E</b> on a bomb site to plant (Terrorists) or next to the bomb to defuse (Counter-Terrorists)
+      </p>
+      <label>Sensitivity <input id="sens" type="range" min="0.2" max="3" step="0.05" value="1"></label>
+      <label>Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+    </details>
+  </div>
+</div>
+
+<div id="hud" class="hidden">
+  <div id="topbar"><span id="scCT">0</span><span id="timer">0:00</span><span id="scT">0</span></div>
+  <div id="phase"></div>
+  <div id="center"></div>
+  <div id="feed"></div>
+  <canvas id="mini" width="140" height="140"></canvas>
+  <div id="cross"><i></i><i></i><i></i><i></i></div>
+  <div id="hitm"></div>
+  <div id="vig"></div>
+  <div id="scope"></div>
+  <div id="holdbar" class="hidden"><div id="holdfill"></div><span id="holdtxt"></span></div>
+  <div id="bl"><div class="stat"><small>HEALTH</small><b id="hp">100</b></div><div class="stat"><small>ARMOR</small><b id="ar">0</b></div></div>
+  <div id="br"><div id="money">$800</div><div id="wname">Pistol</div><div id="ammo">12 / 36</div></div>
+  <div id="spec" class="hidden"></div>
+  <div id="board" class="hidden"></div>
+  <div id="buy" class="hidden"></div>
+  <div id="pause" class="hidden"><div>CLICK TO RESUME</div></div>
+</div>
+<script type="module" src="js/game.js"></script>
+</body>
+</html>
