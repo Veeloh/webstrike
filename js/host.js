@@ -1,7 +1,7 @@
 // Authoritative game simulation: rounds, economy, bomb, damage, bots.
 // Runs inside the host's browser (solo / P2P host) or inside the Node dedicated server.
 import { G } from './state.js';
-import { W, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite } from './data.js';
+import { W, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite, segClear, navPath, blockedAt } from './data.js';
 
 export const FREEZE = 9, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
 export const H = {
@@ -181,15 +181,25 @@ function holdsTick(dt) {
 
 // ---------- bots ----------
 function botInit(b) {
-  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0 };
+  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null };
   if (b.team === 'T') {
     const site = Math.random() < .75 ? H.plan : (H.plan === 'A' ? 'B' : 'A');
-    a.path = ROUTES[site].map(q => [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1)]);
+    const routes = ROUTES[site], route = routes[Math.random() * routes.length | 0];
+    a.path = route.map(q => [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1)]);
   } else {
     const r = Math.random(), k = r < .35 ? 'A' : r < .7 ? 'B' : 'M';
-    a.path = [[HOLDS[k][0][0] + rnd(-2, 2), HOLDS[k][0][1] + rnd(-1, 1)]];
+    a.path = HOLDS[k].map(q => [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1)]);
   }
   a.home = a.path[a.path.length - 1];
+}
+// Next point to steer toward on the way to (gx,gz): straight there if the way is clear, otherwise along the nav graph.
+function steer(b, a, gx, gz, dt) {
+  if (segClear(b.x, b.z, gx, gz)) { a.nav = null; return [gx, gz]; }
+  let n = a.nav;
+  if (n) n.age += dt;
+  if (!n || n.age > 1.5 || Math.hypot(n.gx - gx, n.gz - gz) > 3) n = a.nav = { gx, gz, pts: navPath(b.x, b.z, gx, gz), i: 0, age: 0 };
+  while (n.i < n.pts.length - 1 && Math.hypot(n.pts[n.i][0] - b.x, n.pts[n.i][1] - b.z) < 1.8) n.i++;
+  return n.pts[n.i];
 }
 function trace(sh, ox, oy, oz, dx, dy, dz, range) {
   let best = castWorld(ox, oy, oz, dx, dy, dz, range), hit = null, head = false;
@@ -248,16 +258,32 @@ function botThink(b, dt) {
     a.strafe -= dt;
     if (a.strafe <= 0) { a.strafe = rnd(.4, 1.3); a.sd = Math.random() < .25 ? 0 : (Math.random() < .5 ? -1 : 1); }
     if (a.sd) { mvx = Math.cos(b.yaw) * a.sd; mvz = -Math.sin(b.yaw) * a.sd; want = true; speed = 2.6; }
+    // Long lanes: while the enemy is still far away, keep advancing on the objective (route waypoint, or the
+    // planted bomb for CTs) while shooting, instead of freezing in place trading fire across the map.
+    if (bd > 14 * SCALE) {
+      let ax = null, az = null;
+      if (b.team === 'CT' && H.bomb.s === 'planted') [ax, az] = steer(b, a, H.bomb.x, H.bomb.z, dt);
+      else if (H.bomb.s !== 'planted' && a.path[a.pi]) {
+        ax = a.path[a.pi][0]; az = a.path[a.pi][1];
+        if (Math.hypot(ax - b.x, az - b.z) < 1.3) a.pi++;
+      }
+      if (ax != null) { const dx = ax - b.x, dz = az - b.z, d = Math.hypot(dx, dz) || 1; mvx = dx / d; mvz = dz / d; want = true; speed = 3.4; }
+    }
   } else if (!holding) {
     const bm = H.bomb;
     if (bm.s === 'planted') {
       if (b.team === 'CT') {
-        gx = bm.x; gz = bm.z;
-        if (Math.hypot(gx - b.x, gz - b.z) < 1.6) { startHold(b, 'defuse'); gx = null; }
+        if (Math.hypot(bm.x - b.x, bm.z - b.z) < 1.6) startHold(b, 'defuse');
+        else [gx, gz] = steer(b, a, bm.x, bm.z, dt);
       } else {
-        if (!a.guard) { const ang = Math.random() * 6.28, r = 3 + Math.random() * 4; a.guard = [bm.x + Math.cos(ang) * r, bm.z + Math.sin(ang) * r]; }
-        gx = a.guard[0]; gz = a.guard[1];
-        if (Math.hypot(gx - b.x, gz - b.z) < 1.5) gx = null;
+        if (!a.guard) {
+          for (let k = 0; k < 10; k++) {
+            const ang = Math.random() * 6.28, r = 3 + Math.random() * 4;
+            a.guard = [bm.x + Math.cos(ang) * r, bm.z + Math.sin(ang) * r];
+            if (!blockedAt(a.guard[0], a.guard[1]) && segClear(bm.x, bm.z, a.guard[0], a.guard[1])) break;
+          }
+        }
+        if (Math.hypot(a.guard[0] - b.x, a.guard[1] - b.z) >= 1.5) [gx, gz] = steer(b, a, a.guard[0], a.guard[1], dt);
       }
     } else {
       const wp = a.path[a.pi];
