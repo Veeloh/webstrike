@@ -1,7 +1,7 @@
 // Authoritative game simulation: rounds, economy, bomb, damage, bots.
 // Runs inside the host's browser (solo / P2P host) or inside the Node dedicated server.
 import { G } from './state.js';
-import { W, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, moveE, castWorld, rayPlayer, losClear, inSite } from './data.js';
+import { W, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite } from './data.js';
 
 export const FREEZE = 9, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
 export const H = {
@@ -126,7 +126,7 @@ function checkEnd() {
 }
 function explode() {
   H.bomb.s = 'boom';
-  for (const p of list()) if (p.alive && Math.hypot(p.x - H.bomb.x, p.z - H.bomb.z) < 22) { p.alive = false; p.hp = 0; p.d++; }
+  for (const p of list()) if (p.alive && Math.hypot(p.x - H.bomb.x, p.z - H.bomb.z) < 22 * SCALE) { p.alive = false; p.hp = 0; p.d++; }
   bcast({ t: 'boom', x: H.bomb.x, z: H.bomb.z });
   sendMeta(); endRound('T', 'Bomb exploded');
 }
@@ -227,9 +227,9 @@ function botThink(b, dt) {
   for (const e of list()) {
     if (!e.alive || e.team === b.team) continue;
     const dx = e.x - b.x, dz = e.z - b.z, d = Math.hypot(dx, dz);
-    if (d > 55 || d >= bd) continue;
+    if (d > 55 * SCALE || d >= bd) continue;
     const dot = (dx * -Math.sin(b.yaw) + dz * -Math.cos(b.yaw)) / (d || 1);
-    if (d > 9 && dot < .3 && a.tgt !== e.id) continue;
+    if (d > 9 * SCALE && dot < .3 && a.tgt !== e.id) continue;
     if (!losClear(b.x, eyeY, b.z, e.x, e.y + 1.25, e.z)) continue;
     tgt = e; bd = d;
   }
@@ -324,7 +324,7 @@ export function onMsg(from, m) {
       if (![m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) return;
       p.yaw = m.yaw; p.pitch = clamp(m.pitch, -1.6, 1.6); p.crouch = m.c ? 1 : 0;
       if (typeof m.w === 'string' && W[m.w]) p.w = m.w;
-      if (m.s === H.sid && H.phase !== 'freeze') { p.x = clamp(m.x, -30, 30); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30, 30); }
+      if (m.s === H.sid && H.phase !== 'freeze') { p.x = clamp(m.x, -30 * SCALE, 30 * SCALE); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30 * SCALE, 30 * SCALE); }
       break;
     }
     case 'fire': {
