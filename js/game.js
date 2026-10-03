@@ -1,7 +1,7 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, BOXES, SITES, moveE, castWorld, rayPlayer, inSite } from './data.js';
+import { W, BOXES, SITES, SCALE, moveE, castWorld, rayPlayer, inSite } from './data.js';
 import { Host } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
@@ -17,8 +17,8 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8fb8e0);
-scene.fog = new THREE.Fog(0x8fb8e0, 45, 120);
-const cam = new THREE.PerspectiveCamera(75, 1, .05, 250);
+scene.fog = new THREE.Fog(0x8fb8e0, 45 * SCALE, 120 * SCALE);
+const cam = new THREE.PerspectiveCamera(75, 1, .05, 250 * SCALE);
 cam.rotation.order = 'YXZ';
 scene.add(cam);
 scene.add(new THREE.HemisphereLight(0xffffff, 0x887766, 1.1));
@@ -35,14 +35,14 @@ const floorTex = mkTex((x, w, h) => {
   for (let i = 0; i < 600; i++) { x.fillStyle = `rgba(${100 + Math.random() * 60 | 0},${80 + Math.random() * 50 | 0},50,.12)`; x.fillRect(Math.random() * w, Math.random() * h, 2, 2); }
   x.strokeStyle = 'rgba(90,70,40,.35)'; x.strokeRect(0, 0, w, h);
 });
-floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(31, 31);
+floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(31 * SCALE, 31 * SCALE);
 const crateTex = mkTex((x, w, h) => {
   x.fillStyle = '#a06f38'; x.fillRect(0, 0, w, h);
   x.strokeStyle = '#5a3a18'; x.lineWidth = 6; x.strokeRect(3, 3, w - 6, h - 6);
   x.lineWidth = 3; for (let i = 1; i < 4; i++) { x.beginPath(); x.moveTo(0, i * h / 4); x.lineTo(w, i * h / 4); x.stroke(); }
   x.beginPath(); x.moveTo(0, 0); x.lineTo(w, h); x.moveTo(w, 0); x.lineTo(0, h); x.stroke();
 });
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(62, 62), new THREE.MeshLambertMaterial({ map: floorTex }));
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(62 * SCALE, 62 * SCALE), new THREE.MeshLambertMaterial({ map: floorTex }));
 floor.rotation.x = -Math.PI / 2; scene.add(floor);
 const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 }), crateMat = new THREE.MeshLambertMaterial({ map: crateTex });
 const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: .28 });
@@ -437,7 +437,7 @@ function fxUpdate(dt) {
 const mini = $('mini'), mctx = mini.getContext('2d');
 function drawMini() {
   const me = meObj(); if (!me) return;
-  const sc = 140 / 62, X = x => (x + 31) * sc, Z = z => (z + 31) * sc;
+  const sc = 140 / (62 * SCALE), X = x => (x + 31 * SCALE) * sc, Z = z => (z + 31 * SCALE) * sc;
   mctx.clearRect(0, 0, 140, 140);
   mctx.fillStyle = '#9a8a62';
   for (const b of BOXES) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
