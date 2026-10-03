@@ -1,7 +1,7 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, BOXES, SITES, SCALE, moveE, castWorld, rayPlayer, inSite } from './data.js';
+import { W, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorld, rayPlayer, inSite } from './data.js';
 import { Host } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
@@ -46,10 +46,21 @@ const floor = new THREE.Mesh(new THREE.PlaneGeometry(62 * SCALE, 62 * SCALE), ne
 floor.rotation.x = -Math.PI / 2; scene.add(floor);
 const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 }), crateMat = new THREE.MeshLambertMaterial({ map: crateTex });
 const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: .28 });
+const glassMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, transparent: true, opacity: .3, depthWrite: false });
+const roofMat = new THREE.MeshLambertMaterial({ color: 0xa4553b }), roofEdgeMat = new THREE.LineBasicMaterial({ color: 0x3b1f17, transparent: true, opacity: .45 });
 for (const b of BOXES) {
   const g = new THREE.BoxGeometry(b.w, b.h, b.d);
-  const m = new THREE.Mesh(g, b.c ? crateMat : wallMat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
-  const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e);
+  const m = new THREE.Mesh(g, b.c === 1 ? crateMat : b.c === 2 ? glassMat : wallMat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
+  if (b.c !== 2) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
+}
+// Gabled roofs (render-only): triangular prism along the building's long axis.
+for (const r of ROOFS) {
+  const sh = new THREE.Shape(); sh.moveTo(-r.hw, 0); sh.lineTo(r.hw, 0); sh.lineTo(0, r.rise); sh.closePath();
+  const g = new THREE.ExtrudeGeometry(sh, { depth: r.len, bevelEnabled: false });
+  g.translate(0, 0, -r.len / 2);
+  if (r.alongX) g.rotateY(Math.PI / 2);
+  const m = new THREE.Mesh(g, roofMat); m.position.set(r.x, r.y, r.z); scene.add(m);
+  const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), roofEdgeMat); e.position.copy(m.position); scene.add(e);
 }
 for (const k in SITES) {
   const s = SITES[k];
@@ -440,7 +451,9 @@ function drawMini() {
   const sc = 140 / (62 * SCALE), X = x => (x + 31 * SCALE) * sc, Z = z => (z + 31 * SCALE) * sc;
   mctx.clearRect(0, 0, 140, 140);
   mctx.fillStyle = '#9a8a62';
-  for (const b of BOXES) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
+  for (const b of BUILDINGS) mctx.fillRect(X(b.x0), Z(b.z0), (b.x1 - b.x0) * sc, (b.z1 - b.z0) * sc);
+  mctx.fillStyle = '#6f5a35';
+  for (const b of BOXES) if (b.c === 1) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
   mctx.fillStyle = 'rgba(230,60,40,.9)'; mctx.font = 'bold 12px sans-serif'; mctx.textAlign = 'center';
   for (const k in SITES) mctx.fillText(k, X(SITES[k].x), Z(SITES[k].z) + 4);
   for (const p of G.players.values()) {
