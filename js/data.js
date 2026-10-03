@@ -29,13 +29,15 @@ for (const k in W) if (!W[k].melee) { W[k].range *= SCALE; W[k].spread /= SCALE;
 //   Site A    top-left room.  Reached via West Alley, or Plaza -> Choke -> A Door.
 //   Site B    right-side room. Reached via East Yard, Plaza -> B Door, or North Hall.
 //
-// Every wall mass is a hollow, roofed building: shell walls with windows, a
-// (render-only) gabled roof, and no way inside. Windows are glass boxes:
+// Every wall mass is a hollow, roofed building: shell walls with windows, doorways
+// you can walk through, and a (render-only) gabled roof. Windows are glass boxes:
 // they block movement but not bullets or line of sight (see castWorld), so
-// you can shoot and spot through them, but not walk through.
+// you can shoot and spot through them, but not walk through. Doorways are open
+// gaps with a lintel above (DOOR_H), so you can walk (and shoot) straight through.
 // Box.c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays)
 // ---------------------------------------------------------------------------
 const HB = 5, WIN_Y0 = 1.1, WIN_Y1 = 2.7, WALL_T = 0.5, WIN_W = 1.4;
+const DOOR_W = 1.0, DOOR_H = 2.8;   // doorway: width in layout units (x SCALE), height in world units
 const ROOF_OH = 0.4, ROOF_RISE = 1.6;
 
 function B(x, y, z, w, h, d, c = 0) {
@@ -75,28 +77,53 @@ function wins(lo, hi, ph) {
   for (let i = 0; i < k; i++) r.push(lo + (i + ph) * L / k);
   return r;
 }
-// One wall strip: thin axis a0..a1, running lo..hi, with window centres `ws` (sorted).
-function strip(horiz, a0, a1, lo, hi, ws) {
+// One wall strip: thin axis a0..a1, running lo..hi, with window centres `ws` (sorted)
+// and doorway centres `ds`. Windows that would overlap a doorway are dropped.
+function strip(horiz, a0, a1, lo, hi, ws, ds = []) {
   const mk = (p0, p1, y0, y1, c = 0) => horiz ? S(p0, a0, p1, a1, y0, y1, c) : S(a0, p0, a1, p1, y0, y1, c);
+  const clearDist = (DOOR_W + WIN_W) / 2 + 0.3;
+  const ops = [];
+  for (const d of ds) ops.push({ c: d, door: true });
+  for (const w of ws) if (!ds.some(d => Math.abs(d - w) < clearDist)) ops.push({ c: w, door: false });
+  ops.sort((p, q) => p.c - q.c);
   let cur = lo;
-  for (const w of ws) {
-    const w0 = w - WIN_W / 2, w1 = w + WIN_W / 2;
+  for (const o of ops) {
+    const half = (o.door ? DOOR_W : WIN_W) / 2, w0 = o.c - half, w1 = o.c + half;
     if (w0 > cur) BOXES.push(mk(cur, w0, 0, HB));
-    BOXES.push(mk(w0, w1, 0, WIN_Y0), mk(w0, w1, WIN_Y1, HB), mk(w0, w1, WIN_Y0, WIN_Y1, 2));
+    if (o.door) BOXES.push(mk(w0, w1, DOOR_H, HB));   // lintel only: the gap below is walkable
+    else BOXES.push(mk(w0, w1, 0, WIN_Y0), mk(w0, w1, WIN_Y1, HB), mk(w0, w1, WIN_Y0, WIN_Y1, 2));
     cur = w1;
   }
   if (hi > cur) BOXES.push(mk(cur, hi, 0, HB));
 }
+// Door phase per face. Opposite faces use different phases so doors never line up
+// straight across a building (same idea as the windows).
+const DOOR_PH = { N: .35, S: .65, W: .35, E: .65 };
 function building(self) {
   const [x0, z0, x1, z1] = self, t = WALL_T, mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
   // windows only on faces that look at open ground (not another building, not the map edge)
   const adj = (px, pz) => BLD.some(o => o !== self && px > o[0] && px < o[2] && pz > o[1] && pz < o[3]);
   const okN = z0 > -28.9 && !adj(mx, z0 - .3), okS = z1 < 29.9 && !adj(mx, z1 + .3);
   const okW = x0 > -28.9 && !adj(x0 - .3, mz), okE = x1 < 28.9 && !adj(x1 + .3, mz);
-  strip(true, z0, z0 + t, x0, x1, okN ? wins(x0, x1, .25) : []);
-  strip(true, z1 - t, z1, x0, x1, okS ? wins(x0, x1, .75) : []);
-  strip(false, x0, x0 + t, z0 + t, z1 - t, okW ? wins(z0, z1, .25) : []);
-  strip(false, x1 - t, x1, z0 + t, z1 - t, okE ? wins(z0, z1, .75) : []);
+  // Doorway for a face: first phase along the face where the whole opening (and a bit of
+  // approach space in front of it) is open ground. Returns [] if the face has no usable spot.
+  const doorFor = face => {
+    const horiz = face === 'N' || face === 'S';
+    const a = horiz ? x0 : z0, b = horiz ? x1 : z1;
+    const lo = a + t + DOOR_W / 2 + .15, hi = b - t - DOOR_W / 2 - .15;
+    if (hi < lo) return [];
+    const off = face === 'N' ? z0 - .8 : face === 'S' ? z1 + .8 : face === 'W' ? x0 - .8 : x1 + .8;
+    if (!(horiz ? off > -28.9 && off < 29.9 : off > -28.9 && off < 28.9)) return [];
+    for (const f of [DOOR_PH[face], .5, .25, .75]) {
+      const c = Math.max(lo, Math.min(hi, a + f * (b - a)));
+      if ([c - DOOR_W / 2, c, c + DOOR_W / 2].every(p => !(horiz ? adj(p, off) : adj(off, p)))) return [c];
+    }
+    return [];
+  };
+  strip(true, z0, z0 + t, x0, x1, okN ? wins(x0, x1, .25) : [], doorFor('N'));
+  strip(true, z1 - t, z1, x0, x1, okS ? wins(x0, x1, .75) : [], doorFor('S'));
+  strip(false, x0, x0 + t, z0 + t, z1 - t, okW ? wins(z0, z1, .25) : [], doorFor('W'));
+  strip(false, x1 - t, x1, z0 + t, z1 - t, okE ? wins(z0, z1, .75) : [], doorFor('E'));
   BUILDINGS.push({ x0: x0 * SCALE, z0: z0 * SCALE, x1: x1 * SCALE, z1: z1 * SCALE });
   const w = x1 - x0, d = z1 - z0, alongX = w >= d, short = Math.min(w, d);
   ROOFS.push({
@@ -174,7 +201,7 @@ export function segClear(x1, z1, x2, z2) {
   return true;
 }
 export function blockedAt(x, z) {
-  for (const f of BUILDINGS) if (x > f.x0 && x < f.x1 && z > f.z0 && z < f.z1) return true; // hollow building interiors are unreachable
+  // Buildings are enterable now (doorways), so their interiors are only blocked by the wall boxes below.
   for (const b of BOXES) if (b.y0 < H_STAND && x + R > b.x0 && x - R < b.x1 && z + R > b.z0 && z - R < b.z1) return true;
   return false;
 }
