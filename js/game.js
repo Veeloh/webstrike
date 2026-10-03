@@ -84,7 +84,7 @@ function gCyl(r, h, c) {
 }
 function buildGun(wid) {
   const w = W[wid], col = w.col, g = new THREE.Group();
-  const add = (mesh, x, y, z, rx = 0) => { mesh.position.set(x, y, z); mesh.rotation.x = rx; g.add(mesh); return mesh; };
+  const add = (mesh, x, y, z, rx = 0) => { mesh.position.set(x, y, z); mesh.rotation.x += rx; g.add(mesh); return mesh; };
   switch (wid) {
     case 'knife':
       add(gBox(.03, .04, .26, 0xd8d8d8), 0, .01, -.17);
