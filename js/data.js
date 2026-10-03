@@ -1,6 +1,10 @@
 // Shared constants, map, weapons, collision and ray helpers. Pure JS: runs in browser and Node.
 export const R = 0.4, H_STAND = 1.75, H_CROUCH = 1.25, HS_MULT = 3;
 
+// Overall map footprint multiplier (floor size, corridor lengths, site spacing).
+// Player size/speed and melee range stay human-scale - only the level's x/z layout grows.
+export const SCALE = 3;
+
 export const W = {
   knife:   { name: 'Knife',         dmg: 40,  delay: .5,  mag: 0,  res: 0,  spread: 0,    auto: false, price: 0,    slot: 3, pellets: 1, range: 2.6, melee: true, kick: 0,    rl: 0,   len: .3,  col: 0xcccccc },
   pistol:  { name: 'Pistol',        dmg: 26,  delay: .15, mag: 12, res: 36, spread: .010, auto: false, price: 0,    slot: 2, pellets: 1, range: 90,  kick: .012, rl: 1.5, len: .25, col: 0x333333 },
@@ -10,8 +14,13 @@ export const W = {
   rifle:   { name: 'Assault Rifle', dmg: 31,  delay: .095,mag: 30, res: 90, spread: .012, auto: true,  price: 2700, slot: 1, pellets: 1, range: 120, kick: .011, rl: 2.3, len: .65, col: 0x2b2f2b },
   awp:     { name: 'Sniper Rifle',  dmg: 115, delay: 1.35,mag: 5,  res: 20, spread: .001, auto: false, price: 4750, slot: 1, pellets: 1, range: 220, kick: .03,  rl: 3.4, len: .85, col: 0x1f2a1f, scope: true },
 };
+// Ranged weapons need to reach across the bigger map; melee stays short (it's a lunge, not a sightline).
+// Spread/kick are angular, so the lateral miss distance scales with range - without this,
+// tripling the map would triple typical engagement distance and make hits far less likely.
+for (const k in W) if (!W[k].melee) { W[k].range *= SCALE; W[k].spread /= SCALE; W[k].kick /= SCALE; }
 
 function B(x, y, z, w, h, d, c = 0) {
+  x *= SCALE; z *= SCALE; w *= SCALE; d *= SCALE;
   return { x, y, z, w, h, d, c, x0: x - w / 2, x1: x + w / 2, y0: y, y1: y + h, z0: z - d / 2, z1: z + d / 2 };
 }
 // c: 0 = wall, 1 = crate
@@ -62,17 +71,18 @@ export const BOXES = [
   B(-19, 0, -24, 2, 1.6, 2, 1), B(-25, 0, -19, 2, 1.6, 2, 1),
 ];
 
-export const SITES = { A: { x: 22, z: -22, r: 6 }, B: { x: -22, z: -22, r: 6 } };
-const row = (z, yaw) => [-8, -4, 0, 4, 8].map(x => [x, z, yaw]);
+export const SITES = { A: { x: 22 * SCALE, z: -22 * SCALE, r: 6 * SCALE }, B: { x: -22 * SCALE, z: -22 * SCALE, r: 6 * SCALE } };
+const row = (z, yaw) => [-8, -4, 0, 4, 8].map(x => [x * SCALE, z * SCALE, yaw]);
 export const SPAWNS = {
   T: [...row(26, 0), ...row(28, 0)],
   CT: [...row(-26, Math.PI), ...row(-28, Math.PI)],
 };
+const pt = (x, z) => [x * SCALE, z * SCALE];
 export const ROUTES = {
-  A: [[24, 22], [24, 8], [24, -6], [24, -14], [22, -22]],
-  B: [[-24, 22], [-24, 8], [-24, -6], [-24, -14], [-22, -22]],
+  A: [pt(24, 22), pt(24, 8), pt(24, -6), pt(24, -14), pt(22, -22)],
+  B: [pt(-24, 22), pt(-24, 8), pt(-24, -6), pt(-24, -14), pt(-22, -22)],
 };
-export const HOLDS = { A: [[20, -18]], B: [[-20, -18]], M: [[0, -18]] };
+export const HOLDS = { A: [pt(20, -18)], B: [pt(-20, -18)], M: [pt(0, -18)] };
 
 export function inSite(p) {
   for (const k in SITES) { const s = SITES[k]; if (Math.hypot(p.x - s.x, p.z - s.z) <= s.r) return k; }
