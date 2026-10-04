@@ -1,8 +1,8 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorld, rayPlayer, inSite } from './data.js';
-import { Host } from './host.js';
+import { W, OPS, OPS_BY_SIDE, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorldBox, rayPlayer, inSite, applyWorld } from './data.js';
+import { Host, MAX_BARR } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
 import { Rank } from './rank.js';
@@ -49,11 +49,30 @@ const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 }), crateMat = n
 const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: .28 });
 const glassMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, transparent: true, opacity: .3, depthWrite: false });
 const roofMat = new THREE.MeshLambertMaterial({ color: 0xa4553b }), roofEdgeMat = new THREE.LineBasicMaterial({ color: 0x3b1f17, transparent: true, opacity: .45 });
-for (const b of BOXES) {
+const rfMat = new THREE.MeshLambertMaterial({ color: 0x8e98a6 });    // reinforced walls (cannot be broken)
+const barMat = new THREE.MeshLambertMaterial({ color: 0x8a5a2b });   // barricades
+// One mesh per BOXES entry. Boxes are never removed mid-round, only switched off (b.off), so the meshes just follow that flag.
+// Carved wall pieces are appended to BOXES, so syncWorld() also grows/shrinks this list.
+const bm = [];
+function addBoxMesh(b) {
   const g = new THREE.BoxGeometry(b.w, b.h, b.d);
-  const m = new THREE.Mesh(g, b.c === 1 ? crateMat : b.c === 2 ? glassMat : wallMat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
-  if (b.c !== 2) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
+  const mat = b.c === 1 ? crateMat : b.c === 2 ? glassMat : b.c === 4 ? barMat : b.rf ? rfMat : wallMat;
+  const m = new THREE.Mesh(g, mat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
+  let e = null;
+  if (b.c !== 2) { e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
+  bm.push({ m, e });
 }
+function syncWorld() {
+  while (bm.length > BOXES.length) {          // new round: drop the carved pieces of the last one
+    const o = bm.pop();
+    scene.remove(o.m); o.m.geometry.dispose();
+    if (o.e) { scene.remove(o.e); o.e.geometry.dispose(); }
+  }
+  for (let i = bm.length; i < BOXES.length; i++) addBoxMesh(BOXES[i]);
+  for (let i = 0; i < BOXES.length; i++) { const v = !BOXES[i].off; bm[i].m.visible = v; if (bm[i].e) bm[i].e.visible = v; }
+}
+for (const b of BOXES) addBoxMesh(b);
+syncWorld();
 // Gabled roofs (render-only): triangular prism along the building's long axis.
 for (const r of ROOFS) {
   const sh = new THREE.Shape(); sh.moveTo(-r.hw, 0); sh.lineTo(r.hw, 0); sh.lineTo(0, r.rise); sh.closePath();
@@ -86,7 +105,7 @@ function gCyl(r, h, c) {
 function buildGun(wid) {
   const w = W[wid], col = w.col, g = new THREE.Group();
   const add = (mesh, x, y, z, rx = 0) => { mesh.position.set(x, y, z); mesh.rotation.x += rx; g.add(mesh); return mesh; };
-  switch (wid) {
+  switch (w.model || wid) {   // operator guns reuse an existing model but keep their own colour
     case 'knife':
       add(gBox(.03, .04, .26, 0xd8d8d8), 0, .01, -.17);
       add(gBox(.035, .045, .13), 0, 0, .04, 0).material.color.setHex(0x3a3a3a);
@@ -184,10 +203,21 @@ function addTracer(a, b) {
   const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: .85 }));
   scene.add(l); fx.push({ o: l, t: .07 });
 }
+// Short-lived debris (wall holes, barricades, impacts). `v` = optional velocity.
+const dustMat = new THREE.MeshLambertMaterial({ color: 0xcdbb8f }), plankMat = new THREE.MeshLambertMaterial({ color: 0x8a5a2b });
+function addDebris(x, y, z, n, mat = dustMat, spread = 3) {
+  for (let i = 0; i < n; i++) {
+    const s = .08 + Math.random() * .16, o = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), mat);
+    o.position.set(x + (Math.random() - .5) * 1.2, y + (Math.random() - .5) * 1.2, z + (Math.random() - .5) * 1.2);
+    o.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+    scene.add(o); fx.push({ o, t: .5 + Math.random() * .4, v: new THREE.Vector3((Math.random() - .5) * spread, Math.random() * spread * .8, (Math.random() - .5) * spread) });
+  }
+}
 let bombMesh = null;
+const snd = id => (W[id] && W[id].snd) || id;   // which existing shot sound an operator gun uses
 
 // ---------------- state ----------------
-let locked = false, started = false, buyOpen = false, boardOpen = false;
+let locked = false, started = false, opsOpen = false, boardOpen = false;
 const ammo = {};
 const keys = {};
 const L = {
@@ -243,8 +273,8 @@ function handle(m) {
         ids.add(q.id);
         let p = G.players.get(q.id);
         if (!p) { p = { id: q.id, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, w: 'pistol', crouch: 0 }; G.players.set(q.id, p); }
-        p.name = q.name; p.team = q.team; p.hp = q.hp; p.armor = q.armor; p.alive = q.alive; p.money = q.money;
-        p.k = q.k; p.d = q.d; p.isBot = q.bot; p.prim = q.prim; p.sec = q.sec; p.kit = q.kit;
+        p.name = q.name; p.team = q.team; p.hp = q.hp; p.armor = q.armor; p.alive = q.alive;
+        p.k = q.k; p.d = q.d; p.isBot = q.bot; p.op = q.op; p.prim = q.prim; p.sec = q.sec;
       }
       if (!G.isHost) for (const id of [...G.players.keys()]) if (!ids.has(id)) G.players.delete(id);
       onMetaMe();
@@ -263,6 +293,7 @@ function handle(m) {
     case 'rs': {
       const prev = G.rs.phase, ps = rk.sT, pc = rk.sCT; G.rs = m;
       if (prev !== m.phase && m.phase === 'live') sfx.go();
+      if (prev === 'freeze' && m.phase !== 'freeze' && opsOpen) setOps(false);   // prep is over: operator select closes
       // ranked: a score going up means that team won the round
       rk.sT = m.sT; rk.sCT = m.sCT;
       const me = meObj();
@@ -280,7 +311,8 @@ function handle(m) {
         const e = ents.get(id); if (e) { e.x = x; e.y = 0; e.z = z; }
         if (id === G.myId) {
           L.vx = L.vz = L.vy = 0; L.rl = 0; L.scoped = false; L.cd = .3; L.lastHp = 100; L.lastAlive = true; L.spec = null;
-          L.slot = p.prim ? 1 : 2; for (const k in ammo) if (ammo[k]) ammo[k].mag = Math.max(ammo[k].mag, 0);
+          L.slot = p.prim ? 1 : 2;
+          for (const k of [p.prim, p.sec]) if (k && W[k]) ammo[k] = { mag: W[k].mag, res: W[k].res };   // fresh loadout every round
           setVM(curWid());
         }
       }
@@ -289,8 +321,23 @@ function handle(m) {
     case 'shot': {
       if (m.id === G.myId) break;
       const d = Math.hypot(m.x - cam.position.x, m.z - cam.position.z);
-      sfx.shot(m.w, clamp(1 - d / 70, 0, 1));
+      sfx.shot(snd(m.w), clamp(1 - d / (70 * SCALE), 0, 1));
       if (W[m.w] && !W[m.w].melee) addTracer(new THREE.Vector3(m.x, m.y - .2, m.z), new THREE.Vector3(m.tx, m.ty, m.tz));
+      break;
+    }
+    case 'world': {   // walls carved / barricades placed or broken. applyWorld is idempotent (the host already applied it).
+      for (const ev of m.ev) {
+        applyWorld(ev);
+        if (!started) continue;   // log replayed to a late joiner: no effects
+        const near = (x, z) => clamp(1 - Math.hypot(x - cam.position.x, z - cam.position.z) / (45 * SCALE), 0, 1);
+        if (ev.k === 'hole') { addDebris(ev.x, 1.4, ev.z, 14); sfx.crumble(near(ev.x, ev.z)); }
+        else if (ev.k === 'barr') {
+          const d = DOORS[ev.d | 0]; if (!d) continue;
+          if (ev.on) sfx.thud(near(d.x, d.z));
+          else { addDebris(d.x, 1.2, d.z, 10, plankMat, 4); sfx.crumble(near(d.x, d.z) * .7); }
+        }
+      }
+      syncWorld();
       break;
     }
     case 'kill': {
@@ -328,22 +375,28 @@ function fire(me, wid, w) {
   let sp = w.spread + speed * .0022 + (L.ground ? 0 : .05) + L.recoil * .0035;
   if (wid === 'awp') sp = L.scoped ? .0008 + speed * .0004 : .07 + sp;
   if (L.cv > .5) sp *= .7;
-  const agg = new Map(); let end = null;
+  const agg = new Map(), walls = new Map(); let end = null;
   for (let i = 0; i < w.pellets; i++) {
     let [dx, dy, dz] = lookDir(me.yaw, me.pitch);
     if (!w.melee) { dx += (Math.random() - .5) * 2 * sp; dy += (Math.random() - .5) * 2 * sp; dz += (Math.random() - .5) * 2 * sp; const l = Math.hypot(dx, dy, dz); dx /= l; dy /= l; dz /= l; }
-    let best = castWorld(ox, oy, oz, dx, dy, dz, w.range), hit = null, head = false;
+    const wr = castWorldBox(ox, oy, oz, dx, dy, dz, w.range);
+    let best = wr.t, wbi = wr.bi, hit = null, head = false;
     for (const e of G.players.values()) {
       if (!e.alive || e.team === me.team || e.id === me.id) continue;
       const r = rayPlayer(e, ox, oy, oz, dx, dy, dz);
-      if (r && r.t < best) { best = r.t; hit = e; head = r.head; }
+      if (r && r.t < best) { best = r.t; hit = e; head = r.head; wbi = -1; }
     }
-    if (i === 0) end = [ox + dx * best, oy + dy * best, oz + dz * best];
+    const px = ox + dx * best, py = oy + dy * best, pz = oz + dz * best;
+    if (i === 0) end = [px, py, pz];
     if (hit) { const g = agg.get(hit.id) || { n: 0, hs: 0 }; g.n++; if (head) g.hs++; agg.set(hit.id, g); }
+    else if (wbi >= 0 && (BOXES[wbi].brk || BOXES[wbi].bar !== undefined)) {   // breakable wall or barricade: the host applies the damage
+      const g = walls.get(wbi) || { n: 0, x: px, y: py, z: pz }; g.n++; walls.set(wbi, g);
+    }
   }
   G.send({ t: 'fire', w: wid, x: ox, y: oy, z: oz, tx: end[0], ty: end[1], tz: end[2] });
   for (const [v, g] of agg) { G.send({ t: 'hit', v, w: wid, n: g.n, hs: g.hs }); L.hitT = .18; L.hitHead = g.hs > 0; sfx.hit(); }
-  sfx.shot(wid, 1);
+  for (const [i, g] of walls) { G.send({ t: 'wall', i, w: wid, n: g.n, x: g.x, y: g.y, z: g.z }); addDebris(g.x, g.y, g.z, 3, BOXES[i].bar !== undefined ? plankMat : dustMat, 2); }
+  sfx.shot(snd(wid), 1);
   if (!w.melee) {
     L.recoil = Math.min(L.recoil + 1, 10); me.pitch = clamp(me.pitch + w.kick, -1.5, 1.5); me.yaw += (Math.random() - .5) * w.kick * .6;
     L.flashT = .05; L.kickV = 1;
@@ -359,7 +412,8 @@ function localUpdate(dt) {
   if (L.rl > 0) { L.rl -= dt; if (L.rl <= 0) finishReload(); }
   if (me.alive) {
     L.deadT = 0;
-    const canMove = rs.phase !== 'freeze' && !L.using;
+    // Prep phase: attackers are held in spawn, defenders can walk around (to place barricades).
+    const canMove = (rs.phase !== 'freeze' || me.team === 'CT') && !L.using && !opsOpen;
     let fx_ = 0, fz = 0;
     if (keys.KeyW) fz += 1; if (keys.KeyS) fz -= 1; if (keys.KeyD) fx_ += 1; if (keys.KeyA) fx_ -= 1;
     const len = Math.hypot(fx_, fz) || 1; fx_ /= len; fz /= len;
@@ -390,7 +444,7 @@ function localUpdate(dt) {
 
     // weapons
     const wid = curWid(), w = W[wid];
-    const trigger = (w.auto ? L.mouse : L.edge) && locked && !buyOpen;
+    const trigger = (w.auto ? L.mouse : L.edge) && locked && !opsOpen;
     if (trigger && rs.phase !== 'freeze' && L.cd <= 0 && L.rl <= 0 && !L.using) fire(me, wid, w);
     L.edge = false;
     if (ammo[wid] && ammo[wid].mag <= 0 && L.rl <= 0 && L.cd <= 0) startReload(wid);
@@ -446,7 +500,11 @@ function syncEnts(dt) {
   }
 }
 function fxUpdate(dt) {
-  for (let i = fx.length - 1; i >= 0; i--) { fx[i].t -= dt; if (fx[i].t <= 0) { scene.remove(fx[i].o); fx[i].o.geometry.dispose(); fx.splice(i, 1); } }
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const f = fx[i]; f.t -= dt;
+    if (f.v) { f.v.y -= 14 * dt; f.o.position.addScaledVector(f.v, dt); f.o.rotation.x += dt * 5; if (f.o.position.y < .04) { f.o.position.y = .04; f.v.set(0, 0, 0); } }
+    if (f.t <= 0) { scene.remove(f.o); f.o.geometry.dispose(); fx.splice(i, 1); }
+  }
   const b = G.rs.bomb;
   if (b && b.s === 'planted') {
     if (!bombMesh) {
@@ -472,6 +530,8 @@ function drawMini() {
   for (const b of BUILDINGS) mctx.fillRect(X(b.x0), Z(b.z0), (b.x1 - b.x0) * sc, (b.z1 - b.z0) * sc);
   mctx.fillStyle = '#6f5a35';
   for (const b of BOXES) if (b.c === 1) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
+  mctx.fillStyle = '#e8a13a';   // placed barricades
+  for (const b of BOXES) if (b.bar !== undefined && !b.off) mctx.fillRect(X(b.x0), Z(b.z0), Math.max(2, b.w * sc), Math.max(2, b.d * sc));
   mctx.fillStyle = 'rgba(230,60,40,.9)'; mctx.font = 'bold 12px sans-serif'; mctx.textAlign = 'center';
   for (const k in SITES) mctx.fillText(k, X(SITES[k].x), Z(SITES[k].z) + 4);
   for (const p of G.players.values()) {
@@ -487,7 +547,7 @@ function drawMini() {
 let lastHud = '';
 function hud(dt) {
   const me = meObj(), rs = G.rs; if (!me) return;
-  $('hp').textContent = me.hp; $('ar').textContent = me.armor | 0; $('money').textContent = '$' + me.money;
+  $('hp').textContent = me.hp; $('ar').textContent = me.armor | 0; $('opname').textContent = me.op && OPS[me.op] ? OPS[me.op].name : '';
   const wid = curWid(), w = W[wid], a = ammo[wid];
   $('wname').textContent = w.name + (L.rl > 0 ? ' (reloading)' : '');
   $('ammo').textContent = w.melee ? '—' : (a ? `${a.mag} / ${a.res}` : '');
@@ -496,7 +556,7 @@ function hud(dt) {
   t = Math.max(0, Math.ceil(t));
   $('timer').textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
   $('timer').style.color = rs.bomb && rs.bomb.s === 'planted' ? '#ff6060' : '#fff';
-  const ph = rs.phase === 'freeze' ? 'BUY TIME — press B' : rs.bomb && rs.bomb.s === 'planted' ? 'BOMB PLANTED' : `Round ${rs.round}`;
+  const ph = rs.phase === 'freeze' ? (me.team === 'CT' ? 'PREP — B: operator · F: barricade' : 'PREP — B: operator') : rs.bomb && rs.bomb.s === 'planted' ? 'BOMB PLANTED' : `Round ${rs.round}`;
   $('phase').textContent = ph;
   // hold bar
   const hb = $('holdbar');
@@ -505,8 +565,16 @@ function hud(dt) {
     $('holdtxt').textContent = rs.hold.type === 'plant' ? 'Planting…' : 'Defusing…';
   } else hb.classList.add('hidden');
   // hint
-  const hint = me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2));
-  if (hint && !rs.hold && L.centerT <= 0) { $('center').textContent = `Hold E to ${me.team === 'T' ? 'plant' : 'defuse'}`; $('center').style.opacity = .9; L.hint = true; }
+  let hint = null;
+  if (me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2))) hint = `Hold E to ${me.team === 'T' ? 'plant' : 'defuse'}`;
+  else if (me.alive && rs.phase === 'freeze' && me.team === 'CT' && !opsOpen) {
+    const di = nearDoor(me);
+    if (di !== null) {
+      const on = !BOXES[DOORS[di].bi].off, used = barricadesUsed();
+      hint = on ? `F — remove barricade (${used}/${MAX_BARR})` : used >= MAX_BARR ? `Barricade limit reached (${MAX_BARR})` : `F — place barricade (${used}/${MAX_BARR})`;
+    }
+  }
+  if (hint && !rs.hold && L.centerT <= 0) { $('center').textContent = hint; $('center').style.opacity = .9; L.hint = true; }
   else if (L.hint && !hint) { $('center').style.opacity = 0; L.hint = false; }
   if (L.centerT > 0) { L.centerT -= dt; if (L.centerT <= 0) $('center').style.opacity = 0; }
   // spectate label
@@ -521,32 +589,62 @@ function hud(dt) {
   if (boardOpen) {
     const h = ['CT', 'T'].map(team => {
       const rows = [...G.players.values()].filter(p => p.team === team).sort((x, y) => y.k - x.k)
-        .map(p => `<tr style="${p.id === me.id ? 'background:rgba(255,255,255,.12)' : ''};opacity:${p.alive ? 1 : .5}"><td>${esc(p.name)}</td><td>${p.k}</td><td>${p.d}</td><td>$${p.money}</td></tr>`).join('');
-      return `<table><tr><th class="t${team}">${team === 'T' ? 'Terrorists' : 'Counter-Terrorists'} — ${team === 'T' ? rs.sT : rs.sCT}</th><th>K</th><th>D</th><th>Money</th></tr>${rows}</table>`;
+        .map(p => `<tr style="${p.id === me.id ? 'background:rgba(255,255,255,.12)' : ''};opacity:${p.alive ? 1 : .5}"><td>${esc(p.name)}</td><td>${p.k}</td><td>${p.d}</td><td>${esc(OPS[p.op] ? OPS[p.op].name : '')}</td></tr>`).join('');
+      return `<table><tr><th class="t${team}">${team === 'T' ? 'Attackers' : 'Defenders'} — ${team === 'T' ? rs.sT : rs.sCT}</th><th>K</th><th>D</th><th>Operator</th></tr>${rows}</table>`;
     }).join('');
     if (h !== lastHud) { $('board').innerHTML = h; lastHud = h; }
   }
-  if (buyOpen) updateBuy();
+  if (opsOpen) updateOps();
 }
 
-// buy menu
-const BUY = [['rifle', 'Assault Rifle'], ['smg', 'SMG'], ['shotgun', 'Shotgun'], ['awp', 'Sniper Rifle'], ['deagle', 'Heavy Pistol'], ['armor', 'Armor', 650], ['kit', 'Defuse Kit', 400]];
-function buildBuy() {
-  $('buy').innerHTML = `<h2><span>BUY MENU</span><span id="bm" style="color:#7ee07e"></span></h2><div class="grid">${BUY.map(([id, n, pr]) =>
-    `<button data-i="${id}">${n}<span>$${pr || W[id].price}</span></button>`).join('')}</div><small>Buying works during buy time and the first seconds of a round. Press B to close.</small>`;
-  $('buy').querySelectorAll('button').forEach(b => b.onclick = () => { G.send({ t: 'buy', item: b.dataset.i }); initAudio(); });
+// ---------------- operator select (replaces the old buy menu) ----------------
+// Each operator is a fixed loadout. You can only change it during the prep phase; it is applied at once and kept for later rounds.
+function buildOps() {
+  const me = meObj(); if (!me) return;
+  const card = id => {
+    const o = OPS[id], p = W[o.prim], s = W[o.sec];
+    const stats = w => `${w.dmg}${w.pellets > 1 ? '×' + w.pellets : ''} dmg · ${Math.round(60 / w.delay)} rpm · ${w.mag} rds`;
+    return `<button data-i="${id}"><b>${esc(o.name)}</b><span class="arm">Armor ${o.armor}</span>` +
+      `<em>${esc(p.name)}</em><i>${stats(p)}</i><em>${esc(s.name)}</em><i>${stats(s)}</i></button>`;
+  };
+  $('ops').innerHTML = `<h2><span>SELECT OPERATOR</span><span id="opside">${me.team === 'T' ? 'ATTACK' : 'DEFENSE'}</span></h2>` +
+    `<div class="grid">${OPS_BY_SIDE[me.team].map(card).join('')}</div><small id="opnote"></small>`;
+  $('ops').querySelectorAll('button').forEach(b => b.onclick = () => { G.send({ t: 'op', op: b.dataset.i }); initAudio(); });
 }
-function updateBuy() {
-  const me = meObj(); $('bm').textContent = '$' + me.money;
-  $('buy').querySelectorAll('button').forEach(b => {
-    const i = b.dataset.i, pr = i === 'armor' ? 650 : i === 'kit' ? 400 : W[i].price;
-    b.disabled = me.money < pr || (i === 'kit' && me.team !== 'CT') || !me.alive;
-  });
+function updateOps() {
+  const me = meObj(); if (!me) return;
+  const prep = G.rs.phase === 'freeze';
+  $('ops').querySelectorAll('button').forEach(b => { b.classList.toggle('sel', b.dataset.i === me.op); b.disabled = !prep; });
+  $('opnote').textContent = prep ? 'Pick your operator during prep. Press B to close.' : 'Operators can only be changed during the prep phase. Press B to close.';
 }
-function setBuy(on) {
-  buyOpen = on; $('buy').classList.toggle('hidden', !on);
+function setOps(on) {
+  opsOpen = on; $('ops').classList.toggle('hidden', !on);
   $('pause').classList.toggle('hidden', on || locked);
-  if (on) { buildBuy(); document.exitPointerLock(); } else if (started) renderer.domElement.requestPointerLock();
+  if (on) { buildOps(); updateOps(); document.exitPointerLock(); }
+  else if (started) { const r = renderer.domElement.requestPointerLock(); if (r && r.catch) r.catch(() => {}); }
+}
+
+// ---------------- barricades (defenders, prep phase) ----------------
+const barricadesUsed = () => DOORS.filter(d => !BOXES[d.bi].off).length;
+// The doorway the player is looking at / standing nearest to (within the host's reach limit), or null.
+function nearDoor(me) {
+  const fx_ = -Math.sin(me.yaw), fz = -Math.cos(me.yaw);
+  let best = null, bs = 1e9;
+  for (let i = 0; i < DOORS.length; i++) {
+    const d = DOORS[i], dx = d.x - me.x, dz = d.z - me.z, dist = Math.hypot(dx, dz);
+    if (dist > 5.5) continue;
+    const dot = (dx * fx_ + dz * fz) / (dist || 1);
+    if (dot < .25) continue;                    // must be roughly in front of the player
+    const s = dist * (1.7 - dot);
+    if (s < bs) { bs = s; best = i; }
+  }
+  return best;
+}
+function toggleBarricade() {
+  const me = meObj();
+  if (!me || !me.alive || me.team !== 'CT' || G.rs.phase !== 'freeze') return;
+  const i = nearDoor(me);
+  if (i !== null) G.send({ t: 'barr', d: i });
 }
 
 // ---------------- input ----------------
@@ -557,7 +655,8 @@ addEventListener('keydown', e => {
   keys[e.code] = true;
   const me = meObj(); if (!me) return;
   if (e.code === 'Tab') { boardOpen = true; $('board').classList.remove('hidden'); }
-  else if (e.code === 'KeyB') setBuy(!buyOpen);
+  else if (e.code === 'KeyB') setOps(!opsOpen);
+  else if (e.code === 'KeyF') toggleBarricade();
   else if (e.code === 'KeyR' && me.alive) startReload(curWid());
   else if (e.code === 'Digit1') switchSlot(1);
   else if (e.code === 'Digit2') switchSlot(2);
@@ -590,7 +689,7 @@ addEventListener('mousemove', e => {
 });
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === renderer.domElement;
-  $('pause').classList.toggle('hidden', locked || buyOpen || !started);
+  $('pause').classList.toggle('hidden', locked || opsOpen || !started);
   if (!locked) L.mouse = false;
 });
 $('pause').onclick = () => { initAudio(); renderer.domElement.requestPointerLock(); };
@@ -603,6 +702,7 @@ function beginPlay() {
   $('menu').classList.add('hidden'); $('hud').classList.remove('hidden'); $('pause').classList.remove('hidden');
   setVM(curWid());
   initAudio();
+  if (G.rs.phase === 'freeze') setOps(true);   // join during prep: open operator select straight away
 }
 function cfg() {
   S.name = ($('name').value.trim() || 'Player').slice(0, 16);
