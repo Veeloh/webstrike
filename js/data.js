@@ -1,5 +1,6 @@
 // Shared constants, map, weapons, collision and ray helpers. Pure JS: runs in browser and Node.
 export const R = 0.4, H_STAND = 1.75, H_CROUCH = 1.25, HS_MULT = 3;
+const cl = (v, a, b) => Math.max(a, Math.min(b, v));
 
 // Overall map footprint multiplier (floor size, corridor lengths, site spacing).
 // Player size/speed and melee range stay human-scale - only the level's x/z layout grows.
@@ -13,6 +14,15 @@ export const W = {
   shotgun: { name: 'Shotgun',       dmg: 12,  delay: .85, mag: 6,  res: 30, spread: .055, auto: false, price: 1800, slot: 1, pellets: 8, range: 25,  kick: .04,  rl: 3.0, len: .6,  col: 0x4a3a2a },
   rifle:   { name: 'Assault Rifle', dmg: 31,  delay: .095,mag: 30, res: 90, spread: .012, auto: true,  price: 2700, slot: 1, pellets: 1, range: 120, kick: .011, rl: 2.3, len: .65, col: 0x2b2f2b },
   awp:     { name: 'Sniper Rifle',  dmg: 115, delay: 1.35,mag: 5,  res: 20, spread: .001, auto: false, price: 4750, slot: 1, pellets: 1, range: 220, kick: .03,  rl: 3.4, len: .85, col: 0x1f2a1f, scope: true },
+  // Operator guns. `model` = which existing gun model to draw, `snd` = which existing shot sound to play.
+  carbine: { name: 'Carbine',        dmg: 27, delay: .075, mag: 25, res: 75,  spread: .014, auto: true,  price: 0, slot: 1, pellets: 1, range: 100, kick: .009, rl: 2.1, len: .55, col: 0x3a4a33, model: 'rifle',   snd: 'rifle' },
+  dmr:     { name: 'Marksman Rifle', dmg: 58, delay: .30,  mag: 10, res: 40,  spread: .004, auto: false, price: 0, slot: 1, pellets: 1, range: 170, kick: .022, rl: 2.8, len: .75, col: 0x2f3a2f, model: 'rifle',   snd: 'rifle' },
+  lmg:     { name: 'LMG',            dmg: 28, delay: .085, mag: 60, res: 120, spread: .020, auto: true,  price: 0, slot: 1, pellets: 1, range: 100, kick: .008, rl: 4.6, len: .70, col: 0x4a4a30, model: 'rifle',   snd: 'rifle' },
+  autosg:  { name: 'Auto Shotgun',   dmg: 10, delay: .38,  mag: 8,  res: 32,  spread: .060, auto: false, price: 0, slot: 1, pellets: 7, range: 22,  kick: .03,  rl: 3.2, len: .55, col: 0x5a3a3a, model: 'shotgun', snd: 'shotgun' },
+  pdw:     { name: 'PDW',            dmg: 23, delay: .06,  mag: 30, res: 90,  spread: .020, auto: true,  price: 0, slot: 1, pellets: 1, range: 60,  kick: .006, rl: 1.9, len: .40, col: 0x2a3a4a, model: 'smg',     snd: 'smg' },
+  br:      { name: 'Battle Rifle',   dmg: 42, delay: .16,  mag: 20, res: 60,  spread: .009, auto: false, price: 0, slot: 1, pellets: 1, range: 130, kick: .016, rl: 2.6, len: .70, col: 0x5a5035, model: 'rifle',   snd: 'rifle' },
+  mpistol: { name: 'Machine Pistol', dmg: 17, delay: .06,  mag: 20, res: 60,  spread: .028, auto: true,  price: 0, slot: 2, pellets: 1, range: 45,  kick: .008, rl: 1.7, len: .25, col: 0x2a2a2a, model: 'pistol',  snd: 'smg' },
+  revolver:{ name: 'Revolver',       dmg: 60, delay: .55,  mag: 6,  res: 24,  spread: .005, auto: false, price: 0, slot: 2, pellets: 1, range: 90,  kick: .035, rl: 2.6, len: .30, col: 0x555555, model: 'deagle',  snd: 'deagle' },
 };
 // Ranged weapons need to reach across the bigger map; melee stays short (it's a lunge, not a sightline).
 // Spread/kick are angular, so the lateral miss distance scales with range - without this,
@@ -20,25 +30,57 @@ export const W = {
 for (const k in W) if (!W[k].melee) { W[k].range *= SCALE; W[k].spread /= SCALE; W[k].kick /= SCALE; }
 
 // ---------------------------------------------------------------------------
+// OPERATORS. Internal team ids stay 'T' (= Attack) and 'CT' (= Defense).
+// Each operator is a fixed loadout: one primary, one secondary, an armour amount. No abilities yet.
+// ---------------------------------------------------------------------------
+export const OPS = {
+  vanguard: { name: 'Vanguard', side: 'T',  prim: 'rifle',   sec: 'pistol',   armor: 60 },
+  breacher: { name: 'Breacher', side: 'T',  prim: 'shotgun', sec: 'deagle',   armor: 100 },
+  phantom:  { name: 'Phantom',  side: 'T',  prim: 'carbine', sec: 'pistol',   armor: 30 },
+  striker:  { name: 'Striker',  side: 'T',  prim: 'smg',     sec: 'mpistol',  armor: 60 },
+  marksman: { name: 'Marksman', side: 'T',  prim: 'dmr',     sec: 'revolver', armor: 30 },
+  warden:   { name: 'Warden',   side: 'CT', prim: 'lmg',     sec: 'pistol',   armor: 100 },
+  anchor:   { name: 'Anchor',   side: 'CT', prim: 'autosg',  sec: 'revolver', armor: 100 },
+  hawk:     { name: 'Hawk',     side: 'CT', prim: 'awp',     sec: 'deagle',   armor: 30 },
+  rook:     { name: 'Rook',     side: 'CT', prim: 'pdw',     sec: 'mpistol',  armor: 60 },
+  bastion:  { name: 'Bastion',  side: 'CT', prim: 'br',      sec: 'pistol',   armor: 60 },
+};
+export const OPS_BY_SIDE = {
+  T: Object.keys(OPS).filter(k => OPS[k].side === 'T'),
+  CT: Object.keys(OPS).filter(k => OPS[k].side === 'CT'),
+};
+
+// ---------------------------------------------------------------------------
 // MAP: "Roofline"
 // Layout coordinates below are in map units (x right, z down; 62 x 62, same as
 // the old map). Everything is multiplied by SCALE when turned into boxes.
 //
-//   CT spawn  top centre (opens to the Plaza through a narrow Choke).
-//   T spawn   walled-off bottom-left corner (no sightline to CT).
+//   Defense spawn  top centre (opens to the Plaza through a narrow Choke).
+//   Attack spawn   walled-off bottom-left corner (no sightline to Defense).
 //   Site A    top-left room.  Reached via West Alley, or Plaza -> Choke -> A Door.
 //   Site B    right-side room. Reached via East Yard, Plaza -> B Door, or North Hall.
 //
 // Every wall mass is a hollow, roofed building: shell walls with windows, doorways
 // you can walk through, and a (render-only) gabled roof. Windows are glass boxes:
-// they block movement but not bullets or line of sight (see castWorld), so
-// you can shoot and spot through them, but not walk through. Doorways are open
-// gaps with a lintel above (DOOR_H), so you can walk (and shoot) straight through.
-// Box.c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays)
+// they block movement but not bullets or line of sight (see castWorld).
+//
+// Box flags:
+//   c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays), 4 = barricade
+//   brk: breakable wall segment (shoot/knife it enough and a hole is carved, see carve())
+//   rf:  reinforced wall (cannot be broken; drawn in a different colour)
+//   bar: barricade, value = index into DOORS. Barricades start switched off.
+//   off: box is currently inactive (carved away, or barricade not placed). Every collision/ray loop skips it.
 // ---------------------------------------------------------------------------
 const HB = 5, WIN_Y0 = 1.1, WIN_Y1 = 2.7, WALL_T = 0.5, WIN_W = 1.4;
 const DOOR_W = 1.0, DOOR_H = 2.8;   // doorway: width in layout units (x SCALE), height in world units
+const HOLE_W = 3.2, HOLE_H = 2.8;   // size of the hole carved into a breakable wall (world units)
 const ROOF_OH = 0.4, ROOF_RISE = 1.6;
+
+export const DOORS = [];       // doorway openings: { x, z, bi } (world centre, index of its barricade box)
+
+// Sites in layout units; reinforced walls are chosen from these.
+const SITE_L = { A: [-21, -19, 6], B: [22, 4, 6] };
+export const SITES = Object.fromEntries(Object.entries(SITE_L).map(([k, [x, z, r]]) => [k, { x: x * SCALE, z: z * SCALE, r: r * SCALE }]));
 
 function B(x, y, z, w, h, d, c = 0) {
   x *= SCALE; z *= SCALE; w *= SCALE; d *= SCALE;
@@ -46,6 +88,10 @@ function B(x, y, z, w, h, d, c = 0) {
 }
 // Box from layout-space corners.
 function S(x0, z0, x1, z1, y0, y1, c = 0) { return B((x0 + x1) / 2, y0, (z0 + z1) / 2, x1 - x0, y1 - y0, z1 - z0, c); }
+// Box from world-space corners.
+function wbox(x0, y0, z0, x1, y1, z1, c = 0) {
+  return { x: (x0 + x1) / 2, y: y0, z: (z0 + z1) / 2, w: x1 - x0, h: y1 - y0, d: z1 - z0, c, x0, x1, y0, y1, z0, z1 };
+}
 
 export const BOXES = [];
 export const BUILDINGS = [];   // footprints in world units (for the minimap)
@@ -79,8 +125,14 @@ function wins(lo, hi, ph) {
 }
 // One wall strip: thin axis a0..a1, running lo..hi, with window centres `ws` (sorted)
 // and doorway centres `ds`. Windows that would overlap a doorway are dropped.
-function strip(horiz, a0, a1, lo, hi, ws, ds = []) {
-  const mk = (p0, p1, y0, y1, c = 0) => horiz ? S(p0, a0, p1, a1, y0, y1, c) : S(a0, p0, a1, p1, y0, y1, c);
+// rf = reinforced building (its walls cannot be broken).
+function strip(horiz, a0, a1, lo, hi, ws, ds, rf) {
+  const mk = (p0, p1, y0, y1, c = 0) => {
+    const b = horiz ? S(p0, a0, p1, a1, y0, y1, c) : S(a0, p0, a1, p1, y0, y1, c);
+    if (c === 0 && rf) b.rf = true;
+    return b;
+  };
+  const wall = (p0, p1) => { const b = mk(p0, p1, 0, HB); b.brk = true; return b; };   // full-height solid segment: breakable
   const clearDist = (DOOR_W + WIN_W) / 2 + 0.3;
   const ops = [];
   for (const d of ds) ops.push({ c: d, door: true });
@@ -89,12 +141,17 @@ function strip(horiz, a0, a1, lo, hi, ws, ds = []) {
   let cur = lo;
   for (const o of ops) {
     const half = (o.door ? DOOR_W : WIN_W) / 2, w0 = o.c - half, w1 = o.c + half;
-    if (w0 > cur) BOXES.push(mk(cur, w0, 0, HB));
-    if (o.door) BOXES.push(mk(w0, w1, DOOR_H, HB));   // lintel only: the gap below is walkable
-    else BOXES.push(mk(w0, w1, 0, WIN_Y0), mk(w0, w1, WIN_Y1, HB), mk(w0, w1, WIN_Y0, WIN_Y1, 2));
+    if (w0 > cur) BOXES.push(wall(cur, w0));
+    if (o.door) {
+      BOXES.push(mk(w0, w1, DOOR_H, HB));                 // lintel: the gap below is walkable
+      const bb = mk(w0, w1, 0, DOOR_H, 4);                // barricade plug, off until a defender places it
+      bb.off = true; bb.bar = DOORS.length;
+      DOORS.push({ x: bb.x, z: bb.z, bi: BOXES.length });
+      BOXES.push(bb);
+    } else BOXES.push(mk(w0, w1, 0, WIN_Y0), mk(w0, w1, WIN_Y1, HB), mk(w0, w1, WIN_Y0, WIN_Y1, 2));
     cur = w1;
   }
-  if (hi > cur) BOXES.push(mk(cur, hi, 0, HB));
+  if (hi > cur) BOXES.push(wall(cur, hi));
 }
 // Door phase per face. Opposite faces use different phases so doors never line up
 // straight across a building (same idea as the windows).
@@ -105,6 +162,8 @@ function building(self) {
   const adj = (px, pz) => BLD.some(o => o !== self && px > o[0] && px < o[2] && pz > o[1] && pz < o[3]);
   const okN = z0 > -28.9 && !adj(mx, z0 - .3), okS = z1 < 29.9 && !adj(mx, z1 + .3);
   const okW = x0 > -28.9 && !adj(x0 - .3, mz), okE = x1 < 28.9 && !adj(x1 + .3, mz);
+  // Buildings next to a site are reinforced (their walls can't be broken).
+  const rf = Object.values(SITE_L).some(([sx, sz, sr]) => Math.hypot(cl(sx, x0, x1) - sx, cl(sz, z0, z1) - sz) <= sr + 3);
   // Doorway for a face: first phase along the face where the whole opening (and a bit of
   // approach space in front of it) is open ground. Returns [] if the face has no usable spot.
   const doorFor = face => {
@@ -115,15 +174,15 @@ function building(self) {
     const off = face === 'N' ? z0 - .8 : face === 'S' ? z1 + .8 : face === 'W' ? x0 - .8 : x1 + .8;
     if (!(horiz ? off > -28.9 && off < 29.9 : off > -28.9 && off < 28.9)) return [];
     for (const f of [DOOR_PH[face], .5, .25, .75]) {
-      const c = Math.max(lo, Math.min(hi, a + f * (b - a)));
+      const c = cl(a + f * (b - a), lo, hi);
       if ([c - DOOR_W / 2, c, c + DOOR_W / 2].every(p => !(horiz ? adj(p, off) : adj(off, p)))) return [c];
     }
     return [];
   };
-  strip(true, z0, z0 + t, x0, x1, okN ? wins(x0, x1, .25) : [], doorFor('N'));
-  strip(true, z1 - t, z1, x0, x1, okS ? wins(x0, x1, .75) : [], doorFor('S'));
-  strip(false, x0, x0 + t, z0 + t, z1 - t, okW ? wins(z0, z1, .25) : [], doorFor('W'));
-  strip(false, x1 - t, x1, z0 + t, z1 - t, okE ? wins(z0, z1, .75) : [], doorFor('E'));
+  strip(true, z0, z0 + t, x0, x1, okN ? wins(x0, x1, .25) : [], doorFor('N'), rf);
+  strip(true, z1 - t, z1, x0, x1, okS ? wins(x0, x1, .75) : [], doorFor('S'), rf);
+  strip(false, x0, x0 + t, z0 + t, z1 - t, okW ? wins(z0, z1, .25) : [], doorFor('W'), rf);
+  strip(false, x1 - t, x1, z0 + t, z1 - t, okE ? wins(z0, z1, .75) : [], doorFor('E'), rf);
   BUILDINGS.push({ x0: x0 * SCALE, z0: z0 * SCALE, x1: x1 * SCALE, z1: z1 * SCALE });
   const w = x1 - x0, d = z1 - z0, alongX = w >= d, short = Math.min(w, d);
   ROOFS.push({
@@ -146,13 +205,51 @@ for (const [cx, cz, w, d, h] of [
   [-26, 20, 2, 1.6, 1.2],                                            // T spawn
 ]) BOXES.push(B(cx, 0, cz, w, h, d, 1));
 
-export const SITES = { A: { x: -21 * SCALE, z: -19 * SCALE, r: 6 * SCALE }, B: { x: 22 * SCALE, z: 4 * SCALE, r: 6 * SCALE } };
+// ---------------------------------------------------------------------------
+// DESTRUCTION. BOXES indices are the same on every client (the map is built deterministically), so the
+// host only has to send small events: { k:'hole', i, x, z }, { k:'barr', d, on }, { k:'reset' }.
+// Boxes are never removed during a round, only switched off; carved pieces are appended in event order.
+// ---------------------------------------------------------------------------
+const BASE = BOXES.length;
+
+// Carve a doorway-sized hole out of breakable wall box i around (px, pz). Idempotent.
+export function carve(i, px, pz) {
+  const b = BOXES[i];
+  if (!b || b.off || !b.brk) return;
+  b.off = true;
+  const alongX = b.w >= b.d, lo = alongX ? b.x0 : b.z0, hi = alongX ? b.x1 : b.z1, c = alongX ? px : pz;
+  let h0 = cl(c - HOLE_W / 2, lo, hi), h1 = cl(c + HOLE_W / 2, lo, hi);
+  if (h0 - lo < 1.2) h0 = lo;          // don't leave tiny slivers at the ends
+  if (hi - h1 < 1.2) h1 = hi;
+  const add = (a0, a1, y0, y1, brk) => {
+    if (a1 - a0 < 0.05 || y1 - y0 < 0.05) return;
+    const n = alongX ? wbox(a0, y0, b.z0, a1, y1, b.z1, 0) : wbox(b.x0, y0, a0, b.x1, y1, a1, 0);
+    if (b.rf) n.rf = true;
+    if (brk) n.brk = true;
+    BOXES.push(n);
+  };
+  add(lo, h0, b.y0, b.y1, true);       // left piece
+  add(h1, hi, b.y0, b.y1, true);       // right piece
+  add(h0, h1, HOLE_H, b.y1, false);    // lintel over the hole
+}
+// Back to the start-of-round map: all walls whole, no barricades.
+export function resetWorld() {
+  BOXES.length = BASE;
+  for (const b of BOXES) b.off = b.bar !== undefined;
+}
+export function applyWorld(ev) {
+  if (!ev) return;
+  if (ev.k === 'reset') resetWorld();
+  else if (ev.k === 'hole') { if (Number.isFinite(+ev.x) && Number.isFinite(+ev.z)) carve(ev.i | 0, +ev.x, +ev.z); }
+  else if (ev.k === 'barr') { const d = DOORS[ev.d | 0]; if (d) BOXES[d.bi].off = !ev.on; }
+}
+
 const pt = (x, z) => [x * SCALE, z * SCALE];
 const sp = (list, yaw) => list.map(([x, z]) => [x * SCALE, z * SCALE, yaw]);
 export const SPAWNS = {
-  // T: walled corner, facing the exits (north-east)
+  // T (Attack): walled corner, facing the exits (north-east)
   T: sp([[-26, 29], [-23.5, 29], [-21, 29], [-18.5, 29], [-27, 27], [-24.5, 27], [-22, 27], [-19.5, 27], [-27, 24.5], [-24, 24.5]], -0.7),
-  // CT: top centre, facing south
+  // CT (Defense): top centre, facing south
   CT: sp([[-6, -28.2], [-3, -28.2], [0, -28.2], [3, -28.2], [6, -28.2], [-6, -21.5], [-3, -21.5], [0, -21.5], [3, -21.5], [6, -21.5]], Math.PI),
 };
 // T attack routes: several per site, each a waypoint chain (bots walk straight between waypoints).
@@ -191,7 +288,7 @@ const PR = R + 0.15;
 export function segClear(x1, z1, x2, z2) {
   const lx = Math.min(x1, x2) - PR, hx = Math.max(x1, x2) + PR, lz = Math.min(z1, z2) - PR, hz = Math.max(z1, z2) + PR;
   const near = [];
-  for (const b of BOXES) if (b.y0 < H_STAND && b.x1 > lx && b.x0 < hx && b.z1 > lz && b.z0 < hz) near.push(b);
+  for (const b of BOXES) if (!b.off && b.y0 < H_STAND && b.x1 > lx && b.x0 < hx && b.z1 > lz && b.z0 < hz) near.push(b);
   if (!near.length) return true;
   const d = Math.hypot(x2 - x1, z2 - z1), n = Math.max(1, Math.ceil(d / 0.6));
   for (let i = 0; i <= n; i++) {
@@ -201,8 +298,8 @@ export function segClear(x1, z1, x2, z2) {
   return true;
 }
 export function blockedAt(x, z) {
-  // Buildings are enterable now (doorways), so their interiors are only blocked by the wall boxes below.
-  for (const b of BOXES) if (b.y0 < H_STAND && x + R > b.x0 && x - R < b.x1 && z + R > b.z0 && z - R < b.z1) return true;
+  // Buildings are enterable (doorways), so interiors are only blocked by the wall boxes below.
+  for (const b of BOXES) if (!b.off && b.y0 < H_STAND && x + R > b.x0 && x - R < b.x1 && z + R > b.z0 && z - R < b.z1) return true;
   return false;
 }
 const ADJ = NAV.map(() => []);
@@ -240,7 +337,7 @@ export function inSite(p) {
 
 // ---- collision (axis-separated AABB vs cylinder-as-box). returns bit1=ground, bit2=ceiling
 function overl(e, b, h) {
-  return e.x + R > b.x0 && e.x - R < b.x1 && e.z + R > b.z0 && e.z - R < b.z1 && e.y + h > b.y0 && e.y < b.y1;
+  return !b.off && e.x + R > b.x0 && e.x - R < b.x1 && e.z + R > b.z0 && e.z - R < b.z1 && e.y + h > b.y0 && e.y < b.y1;
 }
 export function moveE(e, dx, dy, dz, h) {
   let flags = 0;
@@ -274,11 +371,22 @@ export function rayBox(ox, oy, oz, dx, dy, dz, x0, y0, z0, x1, y1, z1) {
 export function castWorld(ox, oy, oz, dx, dy, dz, max) {
   let best = max;
   for (const b of BOXES) {
-    if (b.c === 2) continue; // window glass: bullets and sight pass through
+    if (b.off || b.c === 2) continue; // switched-off boxes and window glass: bullets and sight pass through
     const t = rayBox(ox, oy, oz, dx, dy, dz, b.x0, b.y0, b.z0, b.x1, b.y1, b.z1); if (t < best) best = t;
   }
   if (dy < 0) { const t = -oy / dy; if (t >= 0 && t < best) best = t; }
   return best;
+}
+// Same as castWorld but also says which box was hit (bi = index into BOXES, or -1 for floor / nothing).
+export function castWorldBox(ox, oy, oz, dx, dy, dz, max) {
+  let best = max, bi = -1;
+  for (let i = 0; i < BOXES.length; i++) {
+    const b = BOXES[i];
+    if (b.off || b.c === 2) continue;
+    const t = rayBox(ox, oy, oz, dx, dy, dz, b.x0, b.y0, b.z0, b.x1, b.y1, b.z1); if (t < best) { best = t; bi = i; }
+  }
+  if (dy < 0) { const t = -oy / dy; if (t >= 0 && t < best) { best = t; bi = -1; } }
+  return { t: best, bi };
 }
 export function rayPlayer(e, ox, oy, oz, dx, dy, dz) {
   const h = e.crouch ? H_CROUCH : H_STAND, hb = h - 0.28;
