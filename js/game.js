@@ -5,6 +5,7 @@ import { W, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorld, rayPlayer, 
 import { Host } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
+import { Rank } from './rank.js';
 
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -197,6 +198,13 @@ const L = {
 const feed = [];
 const meObj = () => G.players.get(G.myId);
 
+// ranked: last-seen round scores and K/D, so only changes while I'm playing count
+const rk = { sT: null, sCT: null, k: null, d: null };
+const rankMult = () => {
+  const me = meObj(), foes = [...G.players.values()].filter(p => p.team !== me.team);
+  return foes.length && foes.every(p => p.isBot) ? .5 : 1;
+};
+
 function curWid() {
   const me = meObj();
   if (L.slot === 3) return 'knife';
@@ -221,6 +229,9 @@ function onMetaMe() {
   for (const k in ammo) if (k !== me.prim && k !== me.sec) delete ammo[k];
   if (me.prim !== L.lastPrim) { if (me.prim) L.slot = 1; L.lastPrim = me.prim; setVM(curWid()); }
   if (L.lastAlive && !me.alive) { L.scoped = false; L.deadT = 0; L.spec = null; }
+  // ranked: kills/deaths since last meta (re-baseline on first sight, before play starts, or on a stat reset)
+  if (rk.k === null || !started || me.k < rk.k || me.d < rk.d) { rk.k = me.k; rk.d = me.d; }
+  else if (me.k > rk.k || me.d > rk.d) { Rank.kd(me.k - rk.k, me.d - rk.d, rankMult()); rk.k = me.k; rk.d = me.d; }
   L.lastAlive = me.alive;
 }
 function handle(m) {
@@ -250,8 +261,15 @@ function handle(m) {
       break;
     }
     case 'rs': {
-      const prev = G.rs.phase; G.rs = m;
+      const prev = G.rs.phase, ps = rk.sT, pc = rk.sCT; G.rs = m;
       if (prev !== m.phase && m.phase === 'live') sfx.go();
+      // ranked: a score going up means that team won the round
+      rk.sT = m.sT; rk.sCT = m.sCT;
+      const me = meObj();
+      if (started && me && ps !== null && me.team) {
+        const tWon = m.sT > ps, ctWon = m.sCT > pc;
+        if (tWon || ctWon) Rank.round(me.team === (tWon ? 'T' : 'CT'), rankMult());
+      }
       break;
     }
     case 'spawn': {
