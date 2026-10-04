@@ -6,7 +6,8 @@ import { W, OPS, OPS_BY_SIDE, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MUL
 
 export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
 const DEFUSE = 7;                          // seconds to defuse (no defuse kits any more)
-const WALL_HP = 240, BAR_HP = 120, MAX_BARR = 6;   // wall damage needed to carve a hole / break a barricade / barricades per round
+const WALL_HP = 240, BAR_HP = 120;   // wall damage needed to carve a hole / break a barricade
+export const MAX_BARR = 6;           // barricades defenders may place per round
 export const H = {
   phase: 'freeze', t: FREEZE, round: 1, sT: 0, sCT: 0, sid: 0, over: false,
   bomb: { s: 'none', x: 0, z: 0, t: 0 }, holds: {}, botsOn: true, size: 5, nextBot: 1, headless: false,
@@ -190,7 +191,7 @@ function holdsTick(dt) {
 
 // ---------- bots ----------
 function botInit(b) {
-  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null };
+  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null, breach: null, breachT: 0 };
   if (b.team === 'T') {
     const site = Math.random() < .75 ? H.plan : (H.plan === 'A' ? 'B' : 'A');
     const routes = ROUTES[site], route = routes[Math.random() * routes.length | 0];
@@ -238,6 +239,30 @@ function botFire(b, tgt, dist) {
   a.cd = w.delay * (w.auto ? 1 : 1.5) + rnd(0, .12);
   if (--a.burst <= 0) { a.cd += rnd(.4, .9); a.burst = 3 + (Math.random() * 5 | 0); }
 }
+// A barricaded doorway in front of a bot that is trying to walk (index into DOORS, or -1).
+function barrierAhead(b, mx, mz) {
+  const l = Math.hypot(mx, mz) || 1; let best = -1, bd = 3.5;
+  for (let i = 0; i < DOORS.length; i++) {
+    const d = DOORS[i]; if (BOXES[d.bi].off) continue;
+    const dx = d.x - b.x, dz = d.z - b.z, dist = Math.hypot(dx, dz);
+    if (dist < bd && (dx * mx + dz * mz) / ((dist * l) || 1) > .2) { bd = dist; best = i; }
+  }
+  return best;
+}
+// Stand and shoot the barricade the bot is stuck behind. Returns false once it is gone (or the bot gave up).
+function botBreach(b, a, dt) {
+  const d = DOORS[a.breach];
+  if (!d || BOXES[d.bi].off || (a.breachT -= dt) <= 0) { a.breach = null; return false; }
+  const dx = d.x - b.x, dz = d.z - b.z, ty = Math.atan2(-dx, -dz);
+  b.yaw = turn(b.yaw, ty, 10 * dt);
+  if (a.cd <= 0 && Math.abs(angDiff(ty, b.yaw)) < .15) {
+    const wid = b.prim || b.sec, w = W[wid];
+    bcast({ t: 'shot', id: b.id, w: wid, x: b.x, y: b.y + 1.55, z: b.z, tx: d.x, ty: 1.2, tz: d.z });
+    damageWall(d.bi, w.dmg * (w.pellets || 1) * .8, d.x, 1.2, d.z);
+    a.cd = w.delay * (w.auto ? 1 : 1.5) + .05;
+  }
+  return true;
+}
 function botThink(b, dt) {
   const a = b.ai; if (!a || !b.alive) return;
   const eyeY = b.y + 1.55;
@@ -278,6 +303,8 @@ function botThink(b, dt) {
       }
       if (ax != null) { const dx = ax - b.x, dz = az - b.z, d = Math.hypot(dx, dz) || 1; mvx = dx / d; mvz = dz / d; want = true; speed = 3.4; }
     }
+  } else if (!holding && a.breach !== null && botBreach(b, a, dt)) {
+    // standing still, shooting through a barricade that blocks the way
   } else if (!holding) {
     const bm = H.bomb;
     if (bm.s === 'planted') {
@@ -312,7 +339,11 @@ function botThink(b, dt) {
   }
   a.st += dt;
   if (a.st > .7) {
-    if (want && !tgt && Math.hypot(b.x - a.lx, b.z - a.lz) < .25) { a.unst = .6; a.ua = (Math.random() < .5 ? 1 : -1) * rnd(1.2, 2.0); }
+    if (want && !tgt && Math.hypot(b.x - a.lx, b.z - a.lz) < .25) {
+      a.unst = .6; a.ua = (Math.random() < .5 ? 1 : -1) * rnd(1.2, 2.0);
+      const bar = barrierAhead(b, mvx, mvz);
+      if (bar >= 0) { a.breach = bar; a.breachT = 6; a.unst = 0; }   // stuck behind a barricade: break it instead of wiggling
+    }
     a.lx = b.x; a.lz = b.z; a.st = 0;
   }
   if (a.unst > 0) { a.unst -= dt; const c = Math.cos(a.ua), s = Math.sin(a.ua); const nx = mvx * c - mvz * s, nz = mvx * s + mvz * c; mvx = nx; mvz = nz; want = true; }
