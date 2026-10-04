@@ -48,17 +48,23 @@ details{margin-top:14px}summary{cursor:pointer;color:#9fb0c4}
 #bl{position:absolute;left:18px;bottom:16px;display:flex;gap:22px}
 .stat small{display:block;font-size:11px;color:#9fb0c4}.stat b{font-size:42px}
 #br{position:absolute;right:20px;bottom:14px;text-align:right}
-#money{color:#7ee07e;font-size:22px}#wname{font-size:14px;color:#cdd}#ammo{font-size:40px;font-weight:800}
+#opname{color:#e8a13a;font-size:22px}#wname{font-size:14px;color:#cdd}#ammo{font-size:40px;font-weight:800}
 #spec{position:absolute;bottom:90px;left:50%;transform:translateX(-50%);font-size:16px;background:rgba(0,0,0,.55);padding:6px 14px;border-radius:5px}
 #board{position:absolute;top:12%;left:50%;transform:translateX(-50%);width:min(760px,94vw);background:rgba(10,14,20,.88);border:1px solid #445;padding:10px 16px}
 #board table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:14px}
 #board th{text-align:left;color:#8fa;font-weight:600;border-bottom:1px solid #445}
 #board td,#board th{padding:3px 8px}#board td+td,#board th+th{text-align:right}
 #board td:first-child,#board th:first-child{text-align:left;width:50%}
-#buy{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(600px,94vw);background:rgba(12,16,22,.94);border:1px solid #556;padding:16px;pointer-events:auto}
-#buy h2{margin:0 0 10px;display:flex;justify-content:space-between;font-size:18px}
-#buy .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-#buy button{display:flex;justify-content:space-between;padding:10px}
-#buy button span{color:#7ee07e}#buy button:disabled{opacity:.4;cursor:not-allowed}
-#buy small{display:block;margin-top:10px;color:#9fb0c4;font-weight:400}
+#ops{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(760px,94vw);background:rgba(12,16,22,.94);border:1px solid #556;padding:16px;pointer-events:auto}
+#ops h2{margin:0 0 10px;display:flex;justify-content:space-between;font-size:18px}
+#opside{color:#e8a13a}
+#ops .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
+#ops button{display:grid;grid-template-columns:1fr auto;gap:2px 8px;text-align:left;padding:10px;font-weight:500}
+#ops button b{font-size:16px}
+#ops button .arm{color:#9fb0c4;font-size:12px;text-align:right;align-self:center}
+#ops button em{grid-column:1/3;font-style:normal;color:#e8a13a;margin-top:4px}
+#ops button i{grid-column:1/3;font-style:normal;color:#9fb0c4;font-size:12px}
+#ops button.sel{border-color:#e8a13a;background:#3d3420;box-shadow:0 0 0 1px #e8a13a inset}
+#ops button:disabled{opacity:.55;cursor:not-allowed}
+#ops small{display:block;margin-top:10px;color:#9fb0c4;font-weight:400}
 #pause{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5);font-size:30px;letter-spacing:4px;pointer-events:auto;cursor:pointer}
