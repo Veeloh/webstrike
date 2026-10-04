@@ -40,6 +40,8 @@ export const sfx = {
   hurt() { tone(160, 60, 0.18, 0.5, 'sawtooth'); },
   beep() { tone(1500, 1500, 0.07, 0.35, 'square'); },
   boom() { noise(1.2, 900, 40, 1.2); tone(70, 25, 1.0, 1.0, 'sine'); },
+  crumble(v = 1) { if (v <= 0.02) return; noise(0.55, 1600, 120, 0.9 * v); tone(90, 35, 0.35, 0.5 * v, 'sine'); },   // wall hole / barricade broken
+  thud(v = 1) { if (v <= 0.02) return; noise(0.12, 700, 150, 0.6 * v); tone(130, 60, 0.1, 0.4 * v, 'square'); },       // barricade placed
   go() { tone(500, 800, 0.15, 0.3, 'triangle'); },
   plant() { tone(900, 900, 0.1, 0.3, 'square'); setTimeout(() => tone(700, 700, 0.15, 0.3, 'square'), 120); },
 };
