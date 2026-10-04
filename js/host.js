@@ -1,13 +1,17 @@
-// Authoritative game simulation: rounds, economy, bomb, damage, bots.
+// Authoritative game simulation: rounds, operators, bomb, damage, walls, bots.
 // Runs inside the host's browser (solo / P2P host) or inside the Node dedicated server.
+// Internal team ids: 'T' = Attack, 'CT' = Defense.
 import { G } from './state.js';
-import { W, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite, segClear, navPath, blockedAt } from './data.js';
+import { W, OPS, OPS_BY_SIDE, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld } from './data.js';
 
-export const FREEZE = 9, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
+export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
+const DEFUSE = 7;                          // seconds to defuse (no defuse kits any more)
+const WALL_HP = 240, BAR_HP = 120, MAX_BARR = 6;   // wall damage needed to carve a hole / break a barricade / barricades per round
 export const H = {
   phase: 'freeze', t: FREEZE, round: 1, sT: 0, sCT: 0, sid: 0, over: false,
   bomb: { s: 'none', x: 0, z: 0, t: 0 }, holds: {}, botsOn: true, size: 5, nextBot: 1, headless: false,
   plan: 'A', acc: { rs: 0, snap: 0, meta: 0 },
+  log: [], whp: new Map(),                 // world events this round (replayed to late joiners), wall hit points left
 };
 
 const list = () => [...G.players.values()];
@@ -16,17 +20,26 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; };
 const turn = (cur, tgt, max) => cur + clamp(angDiff(tgt, cur), -max, max);
 const BOT_NAMES = ['Rex', 'Nova', 'Kilo', 'Echo', 'Zed', 'Ivy', 'Moe', 'Sable', 'Tank', 'Fox', 'Jax', 'Lux', 'Onyx', 'Vee', 'Dash'];
+const SIDE = { T: 'Attackers', CT: 'Defenders' };
 
 function bcast(m, except) {
   if (G.net) G.net.broadcast(m, except);
   if (G.handle && except !== G.myId) G.handle(m);
 }
 
+// ---------- players & operators ----------
+function equip(p, id) {
+  let o = OPS[id];
+  if (!o || o.side !== p.team) { id = OPS_BY_SIDE[p.team][0]; o = OPS[id]; }
+  p.op = id; p.prim = o.prim; p.sec = o.sec; p.armor = o.armor; p.w = o.prim;
+}
 function mk(id, name, team, isBot) {
+  team = team === 'T' ? 'T' : 'CT';
   const p = {
     id, name, team, isBot, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, hp: 100, armor: 0, alive: false,
-    money: 800, k: 0, d: 0, prim: null, sec: 'pistol', kit: false, w: 'pistol', crouch: 0, ai: null,
+    k: 0, d: 0, op: null, prim: null, sec: 'pistol', w: 'pistol', crouch: 0, ai: null,
   };
+  equip(p, null);
   G.players.set(id, p);
   return p;
 }
@@ -45,42 +58,37 @@ function fillBots() {
   }
 }
 
-// ---------- economy ----------
-function purchase(p, item) {
-  if (item === 'armor') { if (p.money < 650 || p.armor >= 100) return false; p.money -= 650; p.armor = 100; return true; }
-  if (item === 'kit') { if (p.team !== 'CT' || p.kit || p.money < 400) return false; p.money -= 400; p.kit = true; return true; }
-  const w = W[item];
-  if (!w || w.price <= 0 || p.money < w.price) return false;
-  p.money -= w.price;
-  if (w.slot === 1) p.prim = item; else if (w.slot === 2) p.sec = item;
-  p.w = p.prim || p.sec;
-  return true;
-}
-function botBuy(b) {
-  const m = () => b.money, r = Math.random();
-  if (!b.prim) {
-    if (m() >= 4750 + 650 && r < .18) purchase(b, 'awp');
-    else if (m() >= 2700) purchase(b, 'rifle');
-    else if (m() >= 1800 && r < .35) purchase(b, 'shotgun');
-    else if (m() >= 1250) purchase(b, 'smg');
-    else if (m() >= 700 && r < .6 && b.sec === 'pistol') purchase(b, 'deagle');
-  }
-  if (b.armor < 50 && m() >= 650) purchase(b, 'armor');
-  if (b.team === 'CT' && !b.kit && m() >= 400 && Math.random() < .6) purchase(b, 'kit');
-}
-
 // ---------- broadcast helpers ----------
 function sendMeta() {
-  bcast({ t: 'meta', p: list().map(p => ({ id: p.id, name: p.name, team: p.team, hp: p.hp, armor: p.armor | 0, alive: p.alive, money: p.money, k: p.k, d: p.d, bot: p.isBot, prim: p.prim, sec: p.sec, kit: p.kit })) });
+  bcast({ t: 'meta', p: list().map(p => ({ id: p.id, name: p.name, team: p.team, hp: p.hp, armor: p.armor | 0, alive: p.alive, k: p.k, d: p.d, bot: p.isBot, op: p.op, prim: p.prim, sec: p.sec })) });
 }
 function sendRS() {
   const hid = Object.keys(H.holds)[0], h = hid ? H.holds[hid] : null;
   let hold = null;
-  if (h) { const p = G.players.get(hid); hold = { id: hid, type: h.type, p: h.p, need: h.type === 'plant' ? PLANT : (p && p.kit ? 5 : 10) }; }
+  if (h) hold = { id: hid, type: h.type, p: h.p, need: h.type === 'plant' ? PLANT : DEFUSE };
   bcast({ t: 'rs', phase: H.phase, tm: Math.max(0, H.t), round: H.round, sT: H.sT, sCT: H.sCT, over: H.over, bomb: { s: H.bomb.s, x: H.bomb.x, z: H.bomb.z, t: Math.max(0, H.bomb.t) }, hold });
 }
 function sendSnap() {
   bcast({ t: 'snap', e: list().map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(3), +p.pitch.toFixed(3), p.w, p.crouch ? 1 : 0]) });
+}
+
+// ---------- world (breakable walls / barricades) ----------
+// Apply an event on the host first (so a headless server stays correct), log it for late joiners, then tell everyone.
+function worldEvent(ev) {
+  applyWorld(ev);
+  H.log.push(ev);
+  bcast({ t: 'world', ev: [ev] });
+}
+function damageWall(i, dmg, x, y, z) {
+  const b = BOXES[i];
+  if (!b || b.off || b.rf) return;
+  const isBar = b.bar !== undefined;
+  if (!isBar && !b.brk) return;
+  const hp = (H.whp.get(i) ?? (isBar ? BAR_HP : WALL_HP)) - dmg;
+  if (hp > 0) { H.whp.set(i, hp); return; }
+  H.whp.delete(i);
+  if (isBar) worldEvent({ k: 'barr', d: b.bar, on: false });
+  else worldEvent({ k: 'hole', i, x: +x.toFixed(2), z: +z.toFixed(2) });
 }
 
 // ---------- rounds ----------
@@ -93,27 +101,28 @@ function spawnOne(p, i) {
 function startRound() {
   H.phase = 'freeze'; H.t = FREEZE; H.bomb = { s: 'none', x: 0, z: 0, t: 0 }; H.holds = {}; H.sid++;
   H.plan = Math.random() < .5 ? 'A' : 'B';
+  H.log = []; H.whp = new Map(); resetWorld();   // walls whole, barricades off
   const idx = { T: 0, CT: 0 };
   for (const p of list()) {
-    if (!p.alive) { p.prim = null; p.armor = 0; p.kit = false; p.sec = 'pistol'; }
-    if (p.isBot) botBuy(p);
+    if (p.isBot) { const ids = OPS_BY_SIDE[p.team]; p.op = ids[Math.random() * ids.length | 0]; }
+    equip(p, p.op);                               // fresh loadout and armour every round
     spawnOne(p, idx[p.team]++);
   }
+  bcast({ t: 'world', ev: [{ k: 'reset' }] });
   bcast({ t: 'spawn', sid: H.sid, l: list().map(p => [p.id, p.x, p.z, p.yaw]) });
-  bcast({ t: 'msg', text: `Round ${H.round} — buy time`, short: 1 });
+  bcast({ t: 'msg', text: `Round ${H.round} — prep phase (B: operator)`, short: 1 });
   sendMeta(); sendRS();
 }
 function startMatch() {
   H.round = 1; H.sT = 0; H.sCT = 0; H.over = false;
-  for (const p of list()) { p.money = 800; p.k = 0; p.d = 0; p.alive = false; }
+  for (const p of list()) { p.k = 0; p.d = 0; p.alive = false; }
   startRound();
 }
 function endRound(winner, reason) {
   if (H.phase !== 'live') return;
   H.phase = 'end'; H.t = ENDT; H.holds = {};
   if (winner === 'T') H.sT++; else H.sCT++;
-  for (const p of list()) p.money = Math.min(16000, p.money + (p.team === winner ? (reason === 'Bomb exploded' ? 3500 : 3250) : 1900));
-  const name = winner === 'T' ? 'Terrorists' : 'Counter-Terrorists';
+  const name = SIDE[winner];
   if (H.sT >= MAXR || H.sCT >= MAXR) { H.over = true; H.t = 9; bcast({ t: 'msg', text: `MATCH OVER — ${name} win ${H.sT}:${H.sCT}`, team: winner }); }
   else bcast({ t: 'msg', text: `${name} win — ${reason}`, team: winner });
   sendMeta(); sendRS();
@@ -121,8 +130,8 @@ function endRound(winner, reason) {
 function checkEnd() {
   if (H.phase !== 'live') return;
   const aT = list().filter(p => p.alive && p.team === 'T').length, aC = list().filter(p => p.alive && p.team === 'CT').length;
-  if (aC === 0) endRound('T', 'Counter-Terrorists eliminated');
-  else if (aT === 0 && H.bomb.s !== 'planted') endRound('CT', 'Terrorists eliminated');
+  if (aC === 0) endRound('T', 'Defenders eliminated');
+  else if (aT === 0 && H.bomb.s !== 'planted') endRound('CT', 'Attackers eliminated');
 }
 function explode() {
   H.bomb.s = 'boom';
@@ -141,7 +150,7 @@ function applyDamage(v, a, wid, n, hs) {
   v.hp -= Math.round(dmg);
   if (v.hp <= 0) {
     v.hp = 0; v.alive = false; v.d++; delete H.holds[v.id];
-    if (a && a.id !== v.id) { a.k++; a.money = Math.min(16000, a.money + 300); }
+    if (a && a.id !== v.id) a.k++;
     bcast({ t: 'kill', kn: a ? a.name : '', kt: a ? a.team : '', vn: v.name, vt: v.team, w: wid, h: hs > 0 ? 1 : 0 });
     sendMeta(); checkEnd();
   } else sendMeta();
@@ -168,7 +177,7 @@ function holdsTick(dt) {
       || (p && !p.isBot && Date.now() - h.seen > 700);
     if (bad) { delete H.holds[id]; continue; }
     h.p += dt;
-    const need = h.type === 'plant' ? PLANT : (p.kit ? 5 : 10);
+    const need = h.type === 'plant' ? PLANT : DEFUSE;
     if (h.p >= need) {
       delete H.holds[id];
       if (h.type === 'plant') {
@@ -259,7 +268,7 @@ function botThink(b, dt) {
     if (a.strafe <= 0) { a.strafe = rnd(.4, 1.3); a.sd = Math.random() < .25 ? 0 : (Math.random() < .5 ? -1 : 1); }
     if (a.sd) { mvx = Math.cos(b.yaw) * a.sd; mvz = -Math.sin(b.yaw) * a.sd; want = true; speed = 2.6; }
     // Long lanes: while the enemy is still far away, keep advancing on the objective (route waypoint, or the
-    // planted bomb for CTs) while shooting, instead of freezing in place trading fire across the map.
+    // planted bomb for defenders) while shooting, instead of freezing in place trading fire across the map.
     if (bd > 14 * SCALE) {
       let ax = null, az = null;
       if (b.team === 'CT' && H.bomb.s === 'planted') [ax, az] = steer(b, a, H.bomb.x, H.bomb.z, dt);
@@ -314,6 +323,7 @@ function botThink(b, dt) {
 // ---------- API ----------
 export function init(o = {}) {
   H.size = o.size || 5; H.botsOn = o.bots !== false; H.headless = !!o.headless;
+  H.log = []; H.whp = new Map(); resetWorld();
   G.players.clear(); G.isHost = true;
   if (!H.headless) { mk('h', (o.name || 'Player').slice(0, 16), o.team || 'CT', false); G.myId = 'h'; }
   fillBots(); startMatch();
@@ -336,7 +346,10 @@ export function onMsg(from, m) {
       const np = mk(from, String(m.name || 'Player').replace(/[<>&"']/g, '').slice(0, 16) || 'Player', team, false);
       const first = humans.length === 0;
       fillBots();
-      if (G.net) G.net.sendTo(from, { t: 'welcome', id: from, team });
+      if (G.net) {
+        G.net.sendTo(from, { t: 'welcome', id: from, team });
+        if (H.log.length) G.net.sendTo(from, { t: 'world', ev: H.log });   // walls already broken / barricades placed this round
+      }
       if (first && H.headless) { startMatch(); break; }
       if (H.phase === 'freeze') {
         spawnOne(np, list().filter(q => q.alive && q.team === team).length);
@@ -350,7 +363,8 @@ export function onMsg(from, m) {
       if (![m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) return;
       p.yaw = m.yaw; p.pitch = clamp(m.pitch, -1.6, 1.6); p.crouch = m.c ? 1 : 0;
       if (typeof m.w === 'string' && W[m.w]) p.w = m.w;
-      if (m.s === H.sid && H.phase !== 'freeze') { p.x = clamp(m.x, -30 * SCALE, 30 * SCALE); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30 * SCALE, 30 * SCALE); }
+      // Attackers are held in their spawn during prep; defenders can move (to place barricades).
+      if (m.s === H.sid && (H.phase !== 'freeze' || p.team === 'CT')) { p.x = clamp(m.x, -30 * SCALE, 30 * SCALE); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30 * SCALE, 30 * SCALE); }
       break;
     }
     case 'fire': {
@@ -368,10 +382,33 @@ export function onMsg(from, m) {
       applyDamage(v, p, m.w, n, hs);
       break;
     }
-    case 'buy': {
-      if (!p || !p.alive) return;
-      if (!(H.phase === 'freeze' || (H.phase === 'live' && H.t > ROUND - 12))) return;
-      if (purchase(p, m.item)) sendMeta();
+    case 'wall': {   // the shooter's client says its bullets hit wall/barricade box m.i at (m.x, m.y, m.z)
+      const b = BOXES[m.i];
+      if (!p || !p.alive || H.phase === 'freeze' || !b || b.off || !W[m.w]) return;
+      if (!(b.brk || b.bar !== undefined)) return;
+      if (m.w !== 'knife' && m.w !== p.prim && m.w !== p.sec) return;
+      if (![m.x, m.y, m.z].every(Number.isFinite)) return;
+      const w = W[m.w], n = clamp(m.n | 0, 1, w.pellets);
+      if (Math.hypot(p.x - m.x, p.z - m.z) > w.range + 2) return;
+      damageWall(m.i, w.dmg * n * (w.melee ? 2 : 1), clamp(m.x, b.x0, b.x1), m.y, clamp(m.z, b.z0, b.z1));
+      break;
+    }
+    case 'op': {     // pick an operator (prep phase only)
+      if (!p || H.phase !== 'freeze') return;
+      const o = OPS[m.op];
+      if (!o || o.side !== p.team) return;
+      equip(p, m.op); sendMeta();
+      break;
+    }
+    case 'barr': {   // defenders toggle a barricade on a doorway (prep phase only)
+      const d = DOORS[m.d | 0];
+      if (!p || !p.alive || p.team !== 'CT' || H.phase !== 'freeze' || !d) return;
+      if (Math.hypot(p.x - d.x, p.z - d.z) > 6) return;
+      if (BOXES[d.bi].off) {
+        if (DOORS.filter(q => !BOXES[q.bi].off).length >= MAX_BARR) return;
+        if (list().some(q => q.alive && Math.hypot(q.x - d.x, q.z - d.z) < 2.6)) return;   // someone is standing in the doorway
+        worldEvent({ k: 'barr', d: m.d | 0, on: true });
+      } else worldEvent({ k: 'barr', d: m.d | 0, on: false });
       break;
     }
     case 'use': {
