@@ -15,7 +15,7 @@
     <p class="sub">Tactical 5v5 bomb defusal, right in your browser</p>
     <label>Name <input id="name" maxlength="16" placeholder="Player"></label>
     <div class="row">
-      <label>Team <select id="team"><option value="CT">Counter-Terrorist</option><option value="T">Terrorist</option></select></label>
+      <label>Team <select id="team"><option value="CT">Defense</option><option value="T">Attack</option></select></label>
       <label>Players per team <select id="size"><option>2</option><option>3</option><option>4</option><option selected>5</option></select></label>
     </div>
     <button id="btnSolo" class="big">▶ Play vs Bots</button>
@@ -40,8 +40,9 @@
       <summary>Controls &amp; settings</summary>
       <p class="help">
         <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> fire · <b>RMB</b> scope (sniper) · <b>Space</b> jump · <b>Shift</b> walk · <b>C</b> crouch<br>
-        <b>R</b> reload · <b>1/2/3</b> primary/secondary/knife · <b>B</b> buy menu · <b>Tab</b> scoreboard<br>
-        <b>Hold E</b> on a bomb site to plant (Terrorists) or next to the bomb to defuse (Counter-Terrorists)
+        <b>R</b> reload · <b>1/2/3</b> primary/secondary/knife · <b>B</b> operator select (prep phase) · <b>Tab</b> scoreboard<br>
+        <b>F</b> place / remove a barricade on the doorway you face (Defense, prep phase) · shoot or knife walls and barricades to break through<br>
+        <b>Hold E</b> on a bomb site to plant (Attack) or next to the bomb to defuse (Defense)
       </p>
       <label>Sensitivity <input id="sens" type="range" min="0.2" max="3" step="0.05" value="1"></label>
       <label>Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.5"></label>
@@ -61,10 +62,10 @@
   <div id="scope"></div>
   <div id="holdbar" class="hidden"><div id="holdfill"></div><span id="holdtxt"></span></div>
   <div id="bl"><div class="stat"><small>HEALTH</small><b id="hp">100</b></div><div class="stat"><small>ARMOR</small><b id="ar">0</b></div></div>
-  <div id="br"><div id="money">$800</div><div id="wname">Pistol</div><div id="ammo">12 / 36</div></div>
+  <div id="br"><div id="opname"></div><div id="wname">Pistol</div><div id="ammo">12 / 36</div></div>
   <div id="spec" class="hidden"></div>
   <div id="board" class="hidden"></div>
-  <div id="buy" class="hidden"></div>
+  <div id="ops" class="hidden"></div>
   <div id="pause" class="hidden"><div>CLICK TO RESUME</div></div>
 </div>
 <script type="module" src="js/game.js"></script>
