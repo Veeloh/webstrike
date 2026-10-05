@@ -35,7 +35,7 @@ G.net = {
   sendTo(id, m) { const ws = socks.get(id); if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); },
 };
 // No player rank on a dedicated server, so bot difficulty is a setting: BOT_LEVEL=0 (easiest) .. 1 (hardest), default 0.4 (about Silver/Gold).
-Host.init({ headless: true, size: +process.env.TEAM_SIZE || 5, bots: process.env.BOTS !== '0', level: process.env.BOT_LEVEL !== undefined ? +process.env.BOT_LEVEL : .4 });
+Host.init({ headless: true, size: +process.env.TEAM_SIZE || 5, bots: process.env.BOTS !== '0', map: process.env.MAP || 'rotate', level: process.env.BOT_LEVEL !== undefined ? +process.env.BOT_LEVEL : .4 });
 
 wss.on('connection', ws => {
   const id = 'p' + (++n);
