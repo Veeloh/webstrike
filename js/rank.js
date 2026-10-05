@@ -126,6 +126,8 @@ export const Rank = {
   },
   get info() { return info(R.rp, R.rounds); },
   get rp() { return R.rp; },
+  // 0..1 difficulty level for bots: 0 at 0 RP (Bronze), 1 at the top tier's threshold (Legend).
+  get level() { return Math.min(1, R.rp / TIERS[TIERS.length - 1].at); },
 };
 
 render();
