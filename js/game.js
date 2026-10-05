@@ -1,8 +1,8 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorldBox, rayPlayer, inSite, applyWorld } from './data.js';
-import { Host, MAX_BARR } from './host.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, PREP_GADGETS, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorldBox, rayPlayer, inSite, applyWorld, blockedAt, leanOff } from './data.js';
+import { Host, MAX_BARR, SQ_NAMES } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
 import { Rank } from './rank.js';
@@ -51,12 +51,13 @@ const glassMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, transparent: t
 const roofMat = new THREE.MeshLambertMaterial({ color: 0xa4553b }), roofEdgeMat = new THREE.LineBasicMaterial({ color: 0x3b1f17, transparent: true, opacity: .45 });
 const rfMat = new THREE.MeshLambertMaterial({ color: 0x8e98a6 });    // reinforced walls (cannot be broken)
 const barMat = new THREE.MeshLambertMaterial({ color: 0x8a5a2b });   // barricades
+const shieldMat = new THREE.MeshLambertMaterial({ color: 0x6fb8ff, transparent: true, opacity: .5, depthWrite: false, side: THREE.DoubleSide });   // deployable shields
 // One mesh per BOXES entry. Boxes are never removed mid-round, only switched off (b.off), so the meshes just follow that flag.
 // Carved wall pieces are appended to BOXES, so syncWorld() also grows/shrinks this list.
 const bm = [];
 function addBoxMesh(b) {
   const g = new THREE.BoxGeometry(b.w, b.h, b.d);
-  const mat = b.c === 1 ? crateMat : b.c === 2 ? glassMat : b.c === 4 ? barMat : b.rf ? rfMat : wallMat;
+  const mat = b.c === 1 ? crateMat : b.c === 2 ? glassMat : b.c === 4 ? barMat : b.c === 5 ? shieldMat : b.rf ? rfMat : wallMat;
   const m = new THREE.Mesh(g, mat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
   let e = null;
   if (b.c !== 2) { e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
@@ -69,7 +70,10 @@ function syncWorld() {
     if (o.e) { scene.remove(o.e); o.e.geometry.dispose(); }
   }
   for (let i = bm.length; i < BOXES.length; i++) addBoxMesh(BOXES[i]);
-  for (let i = 0; i < BOXES.length; i++) { const v = !BOXES[i].off; bm[i].m.visible = v; if (bm[i].e) bm[i].e.visible = v; }
+  for (let i = 0; i < BOXES.length; i++) {
+    const b = BOXES[i], v = !b.off; bm[i].m.visible = v; if (bm[i].e) bm[i].e.visible = v;
+    if (b.c === 0) { const mt = b.rf ? rfMat : wallMat; if (bm[i].m.material !== mt) bm[i].m.material = mt; }   // Reinforcer turns a wall grey
+  }
 }
 for (const b of BOXES) addBoxMesh(b);
 syncWorld();
@@ -179,6 +183,14 @@ function makeModel(p) {
   const arm2 = bx(.14, .5, .14, col); arm2.position.set(-.28, 1.15, -.2); arm2.rotation.x = -1.1; g.add(arm2);
   const gunMount = new THREE.Group(); gunMount.position.set(.22, 1.18, -.5); g.add(gunMount);
   g.userData.gunMount = gunMount; g.userData.gunWid = null;
+  // Fortify Mode tripod (shown only while deployed)
+  const tri = new THREE.Group(); tri.position.set(.22, 0, -.5); tri.visible = false;
+  for (let i = 0; i < 3; i++) {
+    const a = i * 2.094, leg = bx(.05, 1.15, .05, 0x2a2a2a);
+    leg.position.set(Math.sin(a) * .2, .57, Math.cos(a) * .2); leg.rotation.z = Math.sin(a) * .36; leg.rotation.x = -Math.cos(a) * .36; tri.add(leg);
+  }
+  const tHead = bx(.1, .08, .1, 0x555555); tHead.position.y = 1.15; tri.add(tHead);
+  g.add(tri); g.userData.tripod = tri;
   return g;
 }
 function syncGun(e, wid) {
@@ -195,6 +207,12 @@ function makeTag(text) {
   x.strokeText(text, 128, 44); x.fillText(text, 128, 44);
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
   s.scale.set(1.6, .4, 1); s.position.y = 2.15; s.renderOrder = 10; return s;
+}
+function makeMarker() {   // red diamond over an enemy revealed by a drone / beacon, visible through walls
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  x.fillStyle = '#ff3b30'; x.strokeStyle = '#fff'; x.lineWidth = 5; x.beginPath(); x.moveTo(32, 4); x.lineTo(58, 32); x.lineTo(32, 60); x.lineTo(6, 32); x.closePath(); x.fill(); x.stroke();
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
+  sp.scale.set(.55, .55, 1); sp.position.y = 2.6; sp.renderOrder = 11; sp.visible = false; return sp;
 }
 const ents = new Map();
 const fx = [];
@@ -216,6 +234,62 @@ function addDebris(x, y, z, n, mat = dustMat, spread = 3) {
 let bombMesh = null;
 const snd = id => (W[id] && W[id].snd) || id;   // which existing shot sound an operator gun uses
 
+// ---------------- gadget visuals (smoke, drone, beacon, mine) ----------------
+// The host sends the whole object list 4x a second ('gs'); meshes follow it by uid.
+const gx = { o: [], mk: [], set: new Set() };   // world objects; ids of enemies revealed to my side
+const gobjs = new Map();                        // uid -> { kind, g, t, at }
+function mkObj(kind) {
+  const g = new THREE.Group(), lam = c => new THREE.MeshLambertMaterial({ color: c }), bas = c => new THREE.MeshBasicMaterial({ color: c });
+  if (kind === 'smoke') {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(GADGETS.smoke.r, 20, 14), new THREE.MeshLambertMaterial({ color: 0xc6cacf, transparent: true, opacity: .97, side: THREE.DoubleSide }));
+    m.position.y = 1.2; g.add(m); g.userData.body = m;
+  } else if (kind === 'drone') {
+    g.add(new THREE.Mesh(new THREE.BoxGeometry(.45, .12, .45), lam(0x222831)));
+    g.userData.rot = [];
+    for (const [x, z] of [[.28, .28], [-.28, .28], [.28, -.28], [-.28, -.28]]) {
+      const r = new THREE.Mesh(new THREE.CylinderGeometry(.16, .16, .02, 12), lam(0x89a)); r.position.set(x, .08, z); g.add(r); g.userData.rot.push(r);
+    }
+    const led = new THREE.Mesh(new THREE.SphereGeometry(.05), bas(0x4fd1ff)); led.position.y = -.08; g.add(led);
+  } else if (kind === 'beacon') {
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(.22, .28, .14, 12), lam(0x333a44)); b.position.y = .07; g.add(b);
+    const a = new THREE.Mesh(new THREE.CylinderGeometry(.02, .02, .55, 6), lam(0x999999)); a.position.y = .4; g.add(a);
+    const l = new THREE.Mesh(new THREE.SphereGeometry(.07), bas(0xffd24a)); l.position.y = .7; g.add(l); g.userData.led = l;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(GADGETS.beacon.r - .08, GADGETS.beacon.r, 40), new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: .35, side: THREE.DoubleSide, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2; ring.position.y = .04; g.add(ring); g.userData.ring = ring;
+  } else if (kind === 'mine') {
+    const d = new THREE.Mesh(new THREE.CylinderGeometry(.34, .38, .09, 14), lam(0x3b3f2c)); d.position.y = .05; g.add(d);
+    const l = new THREE.Mesh(new THREE.SphereGeometry(.06), bas(0xff3030)); l.position.y = .12; g.add(l); g.userData.led = l;
+  }
+  scene.add(g); return g;
+}
+function syncObjs() {
+  const me = meObj(), now = performance.now(), seen = new Set();
+  for (const [k, u, x, z, side, t, armed] of gx.o) {
+    seen.add(u);
+    let o = gobjs.get(u);
+    if (!o) { o = { kind: k, g: mkObj(k), t, at: now }; gobjs.set(u, o); }
+    o.t = t; o.pos = [x, z]; o.side = side; o.armed = armed;
+  }
+  for (const [u, o] of gobjs) if (!seen.has(u)) { scene.remove(o.g); o.g.traverse(c => { if (c.geometry) c.geometry.dispose(); }); gobjs.delete(u); }
+  for (const [u, o] of gobjs) {
+    const rem = o.t - (now - gx.at) / 1000, ud = o.g.userData, mine = me && o.side === me.team;
+    o.g.position.set(o.pos[0], 0, o.pos[1]);
+    if (o.kind === 'smoke') {
+      const age = GADGETS.smoke.dur - rem; ud.body.scale.setScalar(Math.min(1, .25 + age * 1.6));
+      ud.body.material.opacity = .97 * clamp(rem / 1.2, 0, 1);
+    } else if (o.kind === 'drone') {
+      o.g.position.y = 2.6 + Math.sin(now / 260) * .12; for (const r of ud.rot) r.rotation.y = now / 25;
+    } else if (o.kind === 'beacon') {
+      ud.ring.material.opacity = .22 + .18 * Math.sin(now / 300); ud.led.visible = (now % 900) < 600;
+    } else if (o.kind === 'mine') {
+      o.g.visible = !!mine;                               // enemy mines are invisible to you
+      ud.led.visible = o.armed ? (now % 300) < 150 : (now % 1000) < 700;
+    }
+  }
+}
+function gflags(p) { return (p && p.g && p.g.f) | 0; }
+const gadOf = p => (p && p.op && OPS[p.op] ? OPS[p.op].gad : null);
+
 // ---------------- state ----------------
 let locked = false, started = false, opsOpen = false, boardOpen = false;
 const ammo = {};
@@ -224,12 +298,13 @@ const L = {
   vx: 0, vz: 0, vy: 0, ground: true, slot: 1, cd: 0, rl: 0, rlw: null, recoil: 0, scoped: false, mouse: false, edge: false,
   sendT: 0, useT: 0, using: false, cv: 0, eye: 1.6, sid: -1, deadT: 0, spec: null, dmg: 0, hitT: 0, hitHead: false,
   lastHp: 100, lastPrim: null, flashT: 0, kickV: 0, centerT: 0, beepT: 0, shake: 0, lastAlive: false,
+  lean: 0, gh: { k: false, m: false }, gOn: false, ghostPrev: false, gSlot: 1,
 };
 const feed = [];
 const meObj = () => G.players.get(G.myId);
 
 // ranked: last-seen round scores and K/D, so only changes while I'm playing count
-const rk = { sT: null, sCT: null, k: null, d: null };
+const rk = { sc: null, k: null, d: null };   // sc = last-seen squad scores
 const rankMult = () => {
   const me = meObj(), foes = [...G.players.values()].filter(p => p.team !== me.team);
   return foes.length && foes.every(p => p.isBot) ? .5 : 1;
@@ -274,7 +349,7 @@ function handle(m) {
         let p = G.players.get(q.id);
         if (!p) { p = { id: q.id, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, w: 'pistol', crouch: 0 }; G.players.set(q.id, p); }
         p.name = q.name; p.team = q.team; p.hp = q.hp; p.armor = q.armor; p.alive = q.alive;
-        p.k = q.k; p.d = q.d; p.isBot = q.bot; p.op = q.op; p.prim = q.prim; p.sec = q.sec;
+        p.k = q.k; p.d = q.d; p.isBot = q.bot; p.op = q.op; p.prim = q.prim; p.sec = q.sec; p.sq = q.sq;
       }
       if (!G.isHost) for (const id of [...G.players.keys()]) if (!ids.has(id)) G.players.delete(id);
       onMetaMe();
@@ -286,20 +361,20 @@ function handle(m) {
       for (const e of m.e) {
         if (e[0] === G.myId) continue;
         const p = G.players.get(e[0]); if (!p) continue;
-        p.x = e[1]; p.y = e[2]; p.z = e[3]; p.yaw = e[4]; p.pitch = e[5]; p.w = e[6]; p.crouch = e[7];
+        p.x = e[1]; p.y = e[2]; p.z = e[3]; p.yaw = e[4]; p.pitch = e[5]; p.w = e[6]; p.crouch = e[7]; p.lean = e[8] || 0;
       }
       break;
     }
     case 'rs': {
-      const prev = G.rs.phase, ps = rk.sT, pc = rk.sCT; G.rs = m;
+      const prev = G.rs.phase, ps = rk.sc; G.rs = m;
       if (prev !== m.phase && m.phase === 'live') sfx.go();
       if (prev === 'freeze' && m.phase !== 'freeze' && opsOpen) setOps(false);   // prep is over: operator select closes
-      // ranked: a score going up means that team won the round
-      rk.sT = m.sT; rk.sCT = m.sCT;
+      // ranked: a squad's score going up means it won that round. Scores belong to squads, so swapping sides never looks like a win.
+      rk.sc = m.sc.slice();
       const me = meObj();
-      if (started && me && ps !== null && me.team) {
-        const tWon = m.sT > ps, ctWon = m.sCT > pc;
-        if (tWon || ctWon) Rank.round(me.team === (tWon ? 'T' : 'CT'), rankMult());
+      if (started && me && ps && me.sq !== undefined) {
+        const won = m.sc[me.sq] > ps[me.sq], lost = m.sc[1 - me.sq] > ps[1 - me.sq];
+        if (won || lost) Rank.round(won, rankMult());
       }
       break;
     }
@@ -310,11 +385,43 @@ function handle(m) {
         p.x = x; p.y = 0; p.z = z; p.yaw = yaw; p.pitch = 0; p.alive = true; p.hp = 100;
         const e = ents.get(id); if (e) { e.x = x; e.y = 0; e.z = z; }
         if (id === G.myId) {
-          L.vx = L.vz = L.vy = 0; L.rl = 0; L.scoped = false; L.cd = .3; L.lastHp = 100; L.lastAlive = true; L.spec = null;
+          L.vx = L.vz = L.vy = 0; L.rl = 0; L.scoped = false; L.cd = .3; L.lastHp = 100; L.lastAlive = true; L.spec = null; L.lean = 0; L.ghostPrev = false;
           L.slot = p.prim ? 1 : 2;
           for (const k of [p.prim, p.sec]) if (k && W[k]) ammo[k] = { mag: W[k].mag, res: W[k].res };   // fresh loadout every round
           setVM(curWid());
         }
+      }
+      if (m.swap && started) setOps(true);      // sides just swapped: pick an operator for the new side
+      break;
+    }
+    case 'gs': {   // gadget state: per-player charges / cooldowns / mode flags, world objects, revealed enemies
+      for (const [id, ch, cd, act, bar, f] of m.p) { const p = G.players.get(id); if (p) p.g = { ch, cd, act, bar, f }; }
+      gx.o = m.o; gx.mk = m.mk; gx.at = performance.now();
+      const me = meObj(); gx.set = new Set(me ? m.mk.filter(([, side]) => side === me.team).map(([id]) => id) : []);
+      break;
+    }
+    case 'gfx': {  // one-shot gadget sounds / effects at a position
+      const d = Math.hypot(m.x - cam.position.x, m.z - cam.position.z), near = (r = 45) => clamp(1 - d / (r * SCALE), 0, 1), me = meObj(), mineId = m.id === G.myId;
+      switch (m.k) {
+        case 'smoke': sfx.smoke(near()); break;
+        case 'breach': sfx.breach(near(70)); addDebris(m.x, 1.4, m.z, 10); break;
+        case 'ghost': if (mineId) sfx.ghost(true); break;       // silent for everyone else, that is the point
+        case 'ghostoff': if (mineId) sfx.ghost(false); break;
+        case 'rush': sfx.rush(near(30)); break;
+        case 'drone': sfx.drone(near(35)); break;
+        case 'shield': sfx.shield(near(40)); break;
+        case 'reinforce': sfx.reinforce(near(40)); break;
+        case 'beaconset': case 'mineset': sfx.set(near(18)); break;
+        case 'ping': {
+          const victim = G.players.get(m.id);
+          if (victim && me && victim.team !== me.team) sfx.ping(.8);          // my side's beacon found someone
+          else sfx.ping(near(25) * .6);
+          if (mineId) showCenter('SPOTTED', 1.2);
+          break;
+        }
+        case 'mine': sfx.mine(near(55)); addDebris(m.x, .4, m.z, 12, dustMat, 5); break;
+        case 'fort': sfx.fortify(near(70)); break;                          // deploying is loud
+        case 'unfort': sfx.unfort(near(30)); break;
       }
       break;
     }
@@ -342,12 +449,12 @@ function handle(m) {
     }
     case 'kill': {
       const f = document.createElement('div');
-      f.innerHTML = `<span class="t${m.kt}">${esc(m.kn || 'World')}</span> ${m.h ? '◎' : '▸'} <span style="opacity:.7">[${esc((W[m.w] || {}).name || '')}]</span> <span class="t${m.vt}">${esc(m.vn)}</span>`;
+      f.innerHTML = `<span class="t${m.kt}">${esc(m.kn || 'World')}</span> ${m.h ? '◎' : '▸'} <span style="opacity:.7">[${esc((W[m.w] || GADGETS[m.w] || {}).name || '')}]</span> <span class="t${m.vt}">${esc(m.vn)}</span>`;
       $('feed').appendChild(f); setTimeout(() => f.remove(), 6000);
       while ($('feed').children.length > 6) $('feed').firstChild.remove();
       break;
     }
-    case 'msg': showCenter(m.text, m.short ? 1.8 : 4.5); if (/planted/.test(m.text)) sfx.plant(); break;
+    case 'msg': showCenter(m.text, m.short ? 1.8 : 4.5); if (/planted/.test(m.text)) sfx.plant(); if (m.deny) sfx.deny(); if (m.swap) sfx.swap(); break;
     case 'boom': sfx.boom(); L.shake = 1; break;
     case 'full': alert('Server is full.'); location.reload(); break;
   }
@@ -360,7 +467,7 @@ const lookDir = (yaw, pitch) => [-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitc
 function startReload(wid) {
   const w = W[wid], a = ammo[wid];
   if (!a || w.melee || L.rl > 0 || a.mag >= w.mag || a.res <= 0) return;
-  L.rl = w.rl; L.rlw = wid; L.scoped = false; sfx.reload();
+  L.rl = w.rl * (gflags(meObj()) & 2 ? GADGETS.rush.reloadMul : 1); L.rlw = wid; L.scoped = false; sfx.reload();   // Adrenaline Rush: faster reload
 }
 function finishReload() {
   const a = ammo[L.rlw], w = W[L.rlw];
@@ -370,11 +477,13 @@ function finishReload() {
 function fire(me, wid, w) {
   const a = ammo[wid];
   if (!w.melee) { if (!a) return; if (a.mag <= 0) { startReload(wid); return; } a.mag--; }
-  L.cd = w.delay;
-  const ox = me.x, oy = me.y + L.eye, oz = me.z, speed = Math.hypot(L.vx, L.vz);
+  const fm = (gflags(me) & 4) && wid === me.prim ? GADGETS.fortify : null;   // Fortify Mode: faster, tighter rifle
+  L.cd = w.delay * (fm ? fm.rateMul : 1);
+  const lo = leanOff(me), ox = me.x + lo[0], oy = me.y + L.eye, oz = me.z + lo[1], speed = Math.hypot(L.vx, L.vz);
   let sp = w.spread + speed * .0022 + (L.ground ? 0 : .05) + L.recoil * .0035;
   if (wid === 'awp') sp = L.scoped ? .0008 + speed * .0004 : .07 + sp;
   if (L.cv > .5) sp *= .7;
+  if (fm) sp *= fm.spreadMul;
   const agg = new Map(), walls = new Map(); let end = null;
   for (let i = 0; i < w.pellets; i++) {
     let [dx, dy, dz] = lookDir(me.yaw, me.pitch);
@@ -389,7 +498,7 @@ function fire(me, wid, w) {
     const px = ox + dx * best, py = oy + dy * best, pz = oz + dz * best;
     if (i === 0) end = [px, py, pz];
     if (hit) { const g = agg.get(hit.id) || { n: 0, hs: 0 }; g.n++; if (head) g.hs++; agg.set(hit.id, g); }
-    else if (wbi >= 0 && (BOXES[wbi].brk || BOXES[wbi].bar !== undefined)) {   // breakable wall or barricade: the host applies the damage
+    else if (wbi >= 0 && (BOXES[wbi].brk || BOXES[wbi].bar !== undefined || BOXES[wbi].sh !== undefined)) {   // breakable wall, barricade or shield: the host applies the damage
       const g = walls.get(wbi) || { n: 0, x: px, y: py, z: pz }; g.n++; walls.set(wbi, g);
     }
   }
@@ -409,11 +518,21 @@ function localUpdate(dt) {
   const me = meObj(); if (!me) return;
   const rs = G.rs;
   L.cd -= dt; L.recoil = Math.max(0, L.recoil - dt * 6); L.kickV = Math.max(0, L.kickV - dt * 8);
+  // count gadget timers down between the host's 4 Hz updates (Ghost Walk's bar drains while active, recharges otherwise)
+  for (const q of G.players.values()) if (q.g) {
+    q.g.cd = Math.max(0, q.g.cd - dt); q.g.act = Math.max(0, q.g.act - dt);
+    const gd = GADGETS[gadOf(q)]; if (gd && gd.bar) q.g.bar = q.g.f & 1 ? Math.max(0, q.g.bar - dt) : Math.min(gd.bar, q.g.bar + gd.regen * dt);
+  }
   if (L.rl > 0) { L.rl -= dt; if (L.rl <= 0) finishReload(); }
   if (me.alive) {
     L.deadT = 0;
-    // Prep phase: attackers are held in spawn, defenders can walk around (to place barricades).
-    const canMove = (rs.phase !== 'freeze' || me.team === 'CT') && !L.using && !opsOpen;
+    const gf = gflags(me);   // gadget mode flags: 1 ghost, 2 rush, 4 fortified, 8 slowed
+    // Ghost Walk: the knife comes out while it is on; letting go puts the previous weapon back (unless you drew a gun yourself)
+    if ((gf & 1) && !L.ghostPrev) { L.gSlot = L.slot; switchSlot(3); }
+    else if (!(gf & 1) && L.ghostPrev && L.slot === 3) switchSlot(L.gSlot || 1);
+    L.ghostPrev = !!(gf & 1);
+    // Prep phase: attackers are held in spawn, defenders can walk around (to place barricades). A deployed Bastion cannot move.
+    const canMove = (rs.phase !== 'freeze' || me.team === 'CT') && !L.using && !opsOpen && !(gf & 4);
     let fx_ = 0, fz = 0;
     if (keys.KeyW) fz += 1; if (keys.KeyS) fz -= 1; if (keys.KeyD) fx_ += 1; if (keys.KeyA) fx_ -= 1;
     const len = Math.hypot(fx_, fz) || 1; fx_ /= len; fz /= len;
@@ -421,6 +540,7 @@ function localUpdate(dt) {
     L.cvT = keys.KeyC ? 1 : 0; L.cv += (L.cvT - L.cv) * Math.min(1, dt * 12);
     let sp = keys.ShiftLeft ? 2.6 : (L.cv > .5 ? 2.2 : 5.2);
     if (wid0 === 'awp') sp *= .85; if (wid0 === 'knife') sp *= 1.1; if (L.scoped) sp *= .5;
+    if (gf & 2) sp *= GADGETS.rush.speedMul; if (gf & 8) sp *= GADGETS.mine.slowMul;
     const sy = Math.sin(me.yaw), cy = Math.cos(me.yaw);
     const tvx = canMove ? ((-sy) * fz + cy * fx_) * sp : 0, tvz = canMove ? ((-cy) * fz + (-sy) * fx_) * sp : 0;
     const k = Math.min(1, (L.ground ? 12 : 2.5) * dt);
@@ -434,10 +554,20 @@ function localUpdate(dt) {
     L.eye = 1.6 - .45 * L.cv;
     me.w = wid0;
 
+    // leaning (Q / E): the head moves sideways, but never into a wall
+    const lt = opsOpen ? 0 : (keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0);
+    L.lean += (lt - L.lean) * Math.min(1, dt * 11);
+    let ln = L.lean;
+    if (Math.abs(ln) > .02) {
+      const rx = Math.cos(me.yaw), rz = -Math.sin(me.yaw);
+      for (const f of [1, .75, .5, .25, 0]) { if (!blockedAt(me.x + rx * ln * f * 0.6, me.z + rz * ln * f * 0.6)) { ln *= f; break; } }
+    }
+    me.lean = ln; const lo = leanOff(me);
+
     // use (plant / defuse)
     const eligible = rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) ||
       (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2));
-    const wantUse = !!keys.KeyE && eligible;
+    const wantUse = !!keys.KeyF && eligible;
     if (wantUse) { L.useT -= dt; if (L.useT <= 0) { G.send({ t: 'use', on: true }); L.useT = .2; } }
     else if (L.using) G.send({ t: 'use', on: false });
     L.using = wantUse;
@@ -449,12 +579,12 @@ function localUpdate(dt) {
     L.edge = false;
     if (ammo[wid] && ammo[wid].mag <= 0 && L.rl <= 0 && L.cd <= 0) startReload(wid);
 
-    cam.position.set(me.x, me.y + L.eye, me.z);
-    cam.rotation.set(me.pitch, me.yaw, 0);
+    cam.position.set(me.x + lo[0], me.y + L.eye, me.z + lo[1]);
+    cam.rotation.set(me.pitch, me.yaw, -me.lean * .16);
     cam.fov += ((L.scoped ? 22 : 75) - cam.fov) * Math.min(1, dt * 14); cam.updateProjectionMatrix();
     vm.visible = !L.scoped;
   } else {
-    L.using = false; L.deadT += dt; L.scoped = false; cam.fov = 75; cam.updateProjectionMatrix(); vm.visible = false;
+    L.using = false; me.lean = 0; L.lean = 0; L.deadT += dt; L.scoped = false; cam.fov = 75; cam.updateProjectionMatrix(); vm.visible = false;
     let tg = G.players.get(L.spec);
     if (L.deadT > 1.3 && (!tg || !tg.alive)) {
       tg = [...G.players.values()].find(p => p.alive && p.team === me.team && p.id !== me.id) || null; L.spec = tg ? tg.id : null;
@@ -472,7 +602,7 @@ function localUpdate(dt) {
   L.sendT -= dt;
   if (L.sendT <= 0 && me.alive && L.sid >= 0) {
     L.sendT = .05;
-    G.send({ t: 'st', x: me.x, y: me.y, z: me.z, yaw: me.yaw, pitch: me.pitch, w: curWid(), c: me.crouch, s: L.sid });
+    G.send({ t: 'st', x: me.x, y: me.y, z: me.z, yaw: me.yaw, pitch: me.pitch, w: curWid(), c: me.crouch, l: +(me.lean || 0).toFixed(2), s: L.sid });
   }
 }
 
@@ -483,9 +613,12 @@ function syncEnts(dt) {
   for (const p of G.players.values()) {
     if (p.id === G.myId) continue;
     let e = ents.get(p.id);
+    const mine = !!(me && p.team === me.team);
+    if (e && (e.team !== p.team || e.mine !== mine)) { scene.remove(e.g); ents.delete(p.id); e = null; }   // sides swapped: rebuild (colours, name tag)
     if (!e) {
-      const g = makeModel(p); if (me && p.team === me.team) g.add(makeTag(p.name || ''));
-      scene.add(g); e = { g, x: p.x, y: p.y, z: p.z, ph: 0 }; ents.set(p.id, e);
+      const g = makeModel(p); if (mine) g.add(makeTag(p.name || ''));
+      const mk = makeMarker(); g.add(mk); g.userData.mk = mk;
+      scene.add(g); e = { g, x: p.x, y: p.y, z: p.z, ph: 0, team: p.team, mine, lean: 0, step: 0 }; ents.set(p.id, e);
     }
     const k = Math.min(1, dt * 14), ox = e.x, oz = e.z;
     e.x += (p.x - e.x) * k; e.y += (p.y - e.y) * k; e.z += (p.z - e.z) * k;
@@ -495,8 +628,18 @@ function syncEnts(dt) {
     e.g.userData.legL.rotation.x = sw; e.g.userData.legR.rotation.x = -sw;
     e.g.position.set(e.x, e.y, e.z); e.g.rotation.y = p.yaw;
     syncGun(e, p.w);
+    e.lean += ((p.alive ? (p.lean || 0) : 0) - e.lean) * k;
+    e.g.rotation.z = -e.lean * .38;                                   // leaning: the model tilts the same way the hitbox moves
     if (p.alive) { e.g.rotation.x = 0; e.g.scale.y = p.crouch ? .75 : 1; }
-    else { e.g.rotation.x = -1.5; e.g.position.y = e.y + .2; e.g.scale.y = 1; }
+    else { e.g.rotation.x = -1.5; e.g.rotation.z = 0; e.g.position.y = e.y + .2; e.g.scale.y = 1; }
+    const gf = gflags(p);
+    e.g.userData.tripod.visible = !!(gf & 4) && p.alive;
+    e.g.userData.mk.visible = p.alive && !mine && gx.set.has(p.id);   // revealed by a drone / beacon: shows through walls
+    // footsteps: running makes noise; walking (Shift), crouching, Ghost Walk and a deployed Bastion are silent
+    if (p.alive && sp > 3.6 && e.y < .1 && !(gf & 5) && me) {
+      e.step -= dt;
+      if (e.step <= 0) { e.step = .36; const d = Math.hypot(e.x - cam.position.x, e.z - cam.position.z); sfx.foot(clamp(1 - d / (14 * SCALE), 0, 1) * (mine ? .45 : 1)); }
+    } else e.step = 0;
   }
 }
 function fxUpdate(dt) {
@@ -534,9 +677,18 @@ function drawMini() {
   for (const b of BOXES) if (b.bar !== undefined && !b.off) mctx.fillRect(X(b.x0), Z(b.z0), Math.max(2, b.w * sc), Math.max(2, b.d * sc));
   mctx.fillStyle = 'rgba(230,60,40,.9)'; mctx.font = 'bold 12px sans-serif'; mctx.textAlign = 'center';
   for (const k in SITES) mctx.fillText(k, X(SITES[k].x), Z(SITES[k].z) + 4);
+  // my side's gadgets (enemy mines are never shown)
+  for (const [k, , x, z, side, , armed] of gx.o) {
+    if (side !== me.team) { if (k === 'smoke') { mctx.fillStyle = 'rgba(200,200,200,.5)'; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.smoke.r * sc, 0, 7); mctx.fill(); } continue; }
+    if (k === 'smoke') { mctx.fillStyle = 'rgba(200,200,200,.5)'; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.smoke.r * sc, 0, 7); mctx.fill(); }
+    else if (k === 'drone') { mctx.strokeStyle = '#4fd1ff'; mctx.lineWidth = 1; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.recon.r * sc, 0, 7); mctx.stroke(); mctx.fillStyle = '#4fd1ff'; mctx.fillRect(X(x) - 2, Z(z) - 2, 4, 4); }
+    else if (k === 'beacon') { mctx.fillStyle = '#ffd24a'; mctx.beginPath(); mctx.arc(X(x), Z(z), 2.5, 0, 7); mctx.fill(); }
+    else if (k === 'mine') { mctx.fillStyle = '#ff5050'; mctx.fillRect(X(x) - 1.5, Z(z) - 1.5, 3, 3); }
+  }
   for (const p of G.players.values()) {
-    if (!p.alive || p.id === me.id || p.team !== me.team) continue;
-    mctx.fillStyle = p.team === 'T' ? '#f0b050' : '#6fa0ff'; mctx.beginPath(); mctx.arc(X(p.x), Z(p.z), 3, 0, 7); mctx.fill();
+    if (!p.alive || p.id === me.id) continue;
+    if (p.team === me.team) { mctx.fillStyle = p.team === 'T' ? '#f0b050' : '#6fa0ff'; mctx.beginPath(); mctx.arc(X(p.x), Z(p.z), 3, 0, 7); mctx.fill(); }
+    else if (gx.set.has(p.id)) { mctx.fillStyle = '#ff3b30'; mctx.strokeStyle = '#fff'; mctx.lineWidth = 1; mctx.beginPath(); mctx.arc(X(p.x), Z(p.z), 3.5, 0, 7); mctx.fill(); mctx.stroke(); }   // revealed by a drone / beacon
   }
   const b = G.rs.bomb;
   if (b && b.s === 'planted') { mctx.fillStyle = '#f33'; mctx.fillRect(X(b.x) - 3, Z(b.z) - 3, 6, 6); }
@@ -548,15 +700,23 @@ let lastHud = '';
 function hud(dt) {
   const me = meObj(), rs = G.rs; if (!me) return;
   $('hp').textContent = me.hp; $('ar').textContent = me.armor | 0; $('opname').textContent = me.op && OPS[me.op] ? OPS[me.op].name : '';
+  updateGadHud(me);
   const wid = curWid(), w = W[wid], a = ammo[wid];
   $('wname').textContent = w.name + (L.rl > 0 ? ' (reloading)' : '');
   $('ammo').textContent = w.melee ? '—' : (a ? `${a.mag} / ${a.res}` : '');
-  $('scT').textContent = rs.sT; $('scCT').textContent = rs.sCT;
+  // top bar: each cell shows the squad currently on that side and its score
+  const sqOnSide = side => (side === rs.sq1 ? 0 : 1);
+  for (const side of ['CT', 'T']) {
+    const q = sqOnSide(side), el = $(side === 'T' ? 'scT' : 'scCT');
+    el.querySelector('b').textContent = rs.sc ? rs.sc[q] : 0;
+    el.querySelector('small').textContent = `${SQ_NAMES[q].toUpperCase()} · ${side === 'T' ? 'ATTACK' : 'DEFENSE'}${me.sq === q ? ' (YOU)' : ''}`;
+  }
   let t = rs.bomb && rs.bomb.s === 'planted' ? rs.bomb.t : rs.tm;
   t = Math.max(0, Math.ceil(t));
   $('timer').textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
   $('timer').style.color = rs.bomb && rs.bomb.s === 'planted' ? '#ff6060' : '#fff';
-  const ph = rs.phase === 'freeze' ? (me.team === 'CT' ? 'PREP — B: operator · F: barricade' : 'PREP — B: operator') : rs.bomb && rs.bomb.s === 'planted' ? 'BOMB PLANTED' : `Round ${rs.round}`;
+  const swapRound = rs.round > 1 && (rs.round - 1) % 3 === 0, finalRound = rs.sc && rs.sc[0] === 7 && rs.sc[1] === 7;
+  const ph = rs.phase === 'freeze' ? (swapRound ? 'SIDES SWAPPED — pick an operator (B)' : me.team === 'CT' ? 'PREP — B: operator · F: barricade · G: gadget' : 'PREP — B: operator') : rs.bomb && rs.bomb.s === 'planted' ? 'BOMB PLANTED' : finalRound ? `Round ${rs.round} — FINAL ROUND` : `Round ${rs.round}`;
   $('phase').textContent = ph;
   // hold bar
   const hb = $('holdbar');
@@ -566,7 +726,7 @@ function hud(dt) {
   } else hb.classList.add('hidden');
   // hint
   let hint = null;
-  if (me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2))) hint = `Hold E to ${me.team === 'T' ? 'plant' : 'defuse'}`;
+  if (me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2))) hint = `Hold F to ${me.team === 'T' ? 'plant' : 'defuse'}`;
   else if (me.alive && rs.phase === 'freeze' && me.team === 'CT' && !opsOpen) {
     const di = nearDoor(me);
     if (di !== null) {
@@ -588,13 +748,48 @@ function hud(dt) {
   // scoreboard
   if (boardOpen) {
     const h = ['CT', 'T'].map(team => {
+      const sq = team === rs.sq1 ? 0 : 1;
       const rows = [...G.players.values()].filter(p => p.team === team).sort((x, y) => y.k - x.k)
         .map(p => `<tr style="${p.id === me.id ? 'background:rgba(255,255,255,.12)' : ''};opacity:${p.alive ? 1 : .5}"><td>${esc(p.name)}</td><td>${p.k}</td><td>${p.d}</td><td>${esc(OPS[p.op] ? OPS[p.op].name : '')}</td></tr>`).join('');
-      return `<table><tr><th class="t${team}">${team === 'T' ? 'Attackers' : 'Defenders'} — ${team === 'T' ? rs.sT : rs.sCT}</th><th>K</th><th>D</th><th>Operator</th></tr>${rows}</table>`;
+      return `<table><tr><th class="t${team}">${SQ_NAMES[sq]} · ${team === 'T' ? 'Attack' : 'Defense'}${me.sq === sq ? ' (you)' : ''} — ${rs.sc ? rs.sc[sq] : 0}</th><th>K</th><th>D</th><th>Operator</th></tr>${rows}</table>`;
     }).join('');
     if (h !== lastHud) { $('board').innerHTML = h; lastHud = h; }
   }
   if (opsOpen) updateOps();
+}
+
+// ---------------- gadget HUD ----------------
+const GICON = {   // 24x24 line icons
+  smoke: '<circle cx="8" cy="15" r="4"/><circle cx="14" cy="11" r="5"/><circle cx="18" cy="16" r="3.5"/>',
+  breach: '<path d="M12 2l2 6 6-2-3 5 5 2-6 2 2 6-6-3-6 3 2-6-6-2 5-2-3-5 6 2z"/>',
+  ghost: '<path d="M5 21V11a7 7 0 0114 0v10l-3-2-2 2-2-2-2 2-2-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>',
+  rush: '<path d="M13 2L5 14h6l-1 8 9-13h-6z"/>',
+  recon: '<circle cx="12" cy="12" r="3"/><path d="M5 5l4 4M19 5l-4 4M5 19l4-4M19 19l-4-4"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>',
+  shield: '<path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.500-2-8-6-8-11V5z"/><path d="M12 6v12"/>',
+  reinforce: '<path d="M3 6h18v12H3zM3 12h18M9 6v6M15 12v6"/>',
+  beacon: '<circle cx="12" cy="14" r="2"/><path d="M12 16v6M7 9a7 7 0 000 10M17 9a7 7 0 010 10M4 6a11 11 0 000 16M20 6a11 11 0 010 16"/>',
+  mine: '<circle cx="12" cy="13" r="6"/><path d="M12 3v4M12 19v4M2 13h4M18 13h4M5 6l3 3M19 6l-3 3"/>',
+  fortify: '<path d="M12 4v6M12 10L5 21M12 10l7 11M12 10l-1 11M8 4h8"/>',
+};
+function updateGadHud(me) {
+  const id = gadOf(me), g = GADGETS[id], box = $('gad');
+  if (!g) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  if (box.dataset.id !== id) { box.dataset.id = id; $('gicon').innerHTML = GICON[id] || ''; $('gname').textContent = g.name; }
+  const st = me.g || { ch: 0, cd: 0, act: 0, bar: g.bar || 0, f: 0 }, f = st.f | 0;
+  const phaseOk = G.rs.phase === 'live' || (G.rs.phase === 'freeze' && me.team === 'CT' && PREP_GADGETS.has(id));
+  let can = me.alive && phaseOk, on = false, txt = '', cd = 0;
+  if (g.charges != null) { txt = '×' + st.ch; cd = st.cd / g.cd; can = can && st.ch > 0 && st.cd <= 0; }
+  else if (g.bar) {                                            // Ghost Walk
+    on = !!(f & 1); txt = on ? 'ACTIVE ' + st.bar.toFixed(1) + 's' : st.bar < g.min ? 'RECHARGING' : Math.round(st.bar / g.bar * 100) + '%';
+    cd = 1 - st.bar / g.bar; can = can && (on || st.bar >= g.min);
+  } else if (g.toggle) {                                       // Fortify Mode
+    on = !!(f & 4); txt = on ? 'DEPLOYED' : st.cd > 0 ? Math.ceil(st.cd) + 's' : 'READY'; cd = st.cd / g.cd; can = can && st.cd <= 0;
+  } else {                                                     // cooldown gadget (Adrenaline Rush)
+    on = st.act > 0; txt = on ? Math.ceil(st.act) + 's' : st.cd > 0 ? Math.ceil(st.cd) + 's' : 'READY'; cd = on ? 0 : st.cd / g.cd; can = can && st.cd <= 0 && !on;
+  }
+  box.classList.toggle('off', !can && !on); box.classList.toggle('on', on);
+  $('gtxt').textContent = txt; $('gcd').style.width = Math.max(0, Math.min(1, cd)) * 100 + '%';
 }
 
 // ---------------- operator select (replaces the old buy menu) ----------------
@@ -602,10 +797,11 @@ function hud(dt) {
 function buildOps() {
   const me = meObj(); if (!me) return;
   const card = id => {
-    const o = OPS[id], p = W[o.prim], s = W[o.sec];
+    const o = OPS[id], p = W[o.prim], s = W[o.sec], gd = GADGETS[o.gad];
     const stats = w => `${w.dmg}${w.pellets > 1 ? '×' + w.pellets : ''} dmg · ${Math.round(60 / w.delay)} rpm · ${w.mag} rds`;
     return `<button data-i="${id}"><b>${esc(o.name)}</b><span class="arm">Armor ${o.armor}</span>` +
-      `<em>${esc(p.name)}</em><i>${stats(p)}</i><em>${esc(s.name)}</em><i>${stats(s)}</i></button>`;
+      `<em>${esc(p.name)}</em><i>${stats(p)}</i><em>${esc(s.name)}</em><i>${stats(s)}</i>` +
+      `<span class="gd"><b>${esc(gd.name)}</b> — ${esc(gd.desc)}</span></button>`;
   };
   $('ops').innerHTML = `<h2><span>SELECT OPERATOR</span><span id="opside">${me.team === 'T' ? 'ATTACK' : 'DEFENSE'}</span></h2>` +
     `<div class="grid">${OPS_BY_SIDE[me.team].map(card).join('')}</div><small id="opnote"></small>`;
@@ -615,7 +811,7 @@ function updateOps() {
   const me = meObj(); if (!me) return;
   const prep = G.rs.phase === 'freeze';
   $('ops').querySelectorAll('button').forEach(b => { b.classList.toggle('sel', b.dataset.i === me.op); b.disabled = !prep; });
-  $('opnote').textContent = prep ? 'Pick your operator during prep. Press B to close.' : 'Operators can only be changed during the prep phase. Press B to close.';
+  $('opnote').textContent = prep ? 'Pick your operator during prep (each has a gadget: G or Mouse 5). Press B to close.' : 'Operators can only be changed during the prep phase. Press B to close.';
 }
 function setOps(on) {
   opsOpen = on; $('ops').classList.toggle('hidden', !on);
@@ -656,7 +852,8 @@ addEventListener('keydown', e => {
   const me = meObj(); if (!me) return;
   if (e.code === 'Tab') { boardOpen = true; $('board').classList.remove('hidden'); }
   else if (e.code === 'KeyB') setOps(!opsOpen);
-  else if (e.code === 'KeyF') toggleBarricade();
+  else if (e.code === 'KeyF') { if (G.rs.phase === 'freeze') toggleBarricade(); }   // live round: F is hold-to-plant/defuse (handled each frame)
+  else if (e.code === 'KeyG') useGadget('k', true);
   else if (e.code === 'KeyR' && me.alive) startReload(curWid());
   else if (e.code === 'Digit1') switchSlot(1);
   else if (e.code === 'Digit2') switchSlot(2);
@@ -664,14 +861,30 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => {
   keys[e.code] = false;
+  if (e.code === 'KeyG' && started) useGadget('k', false);
   if (e.code === 'Tab') { boardOpen = false; $('board').classList.add('hidden'); }
 });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; L.mouse = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; L.mouse = false; useGadget('k', false); useGadget('m', false); });
+// Gadget key: G or Mouse 5. Ghost Walk is hold-to-use, so release matters; the host ignores a release for the other gadgets.
+function useGadget(src, on) {
+  L.gh[src] = on;
+  const want = L.gh.k || L.gh.m, me = meObj();
+  if (want && !L.gOn) {
+    if (!me || !me.alive || opsOpen || !locked) { L.gh[src] = false; return; }
+    L.gOn = true;
+    if (gadOf(me) === 'fortify') { L.vx = L.vz = 0; }
+    G.send({ t: 'gad', on: true, yaw: me.yaw, pitch: me.pitch });
+  } else if (!want && L.gOn) { L.gOn = false; G.send({ t: 'gad', on: false }); }
+}
+// Mouse 4 / Mouse 5 are the browser's back / forward buttons: swallow them (and the history navigation) during a match.
+for (const ev of ['mousedown', 'mouseup', 'auxclick', 'pointerdown', 'pointerup']) addEventListener(ev, e => { if (started && (e.button === 3 || e.button === 4)) e.preventDefault(); }, true);   // preventDefault only: stopping propagation would also swallow the gadget handler
+addEventListener('popstate', () => { if (started) history.pushState({ ws: 1 }, '', location.href); });
 addEventListener('mousedown', e => {
   if (!started) return;
   initAudio();
   if (!locked) return;
   const me = meObj(); if (!me) return;
+  if (e.button === 4) { useGadget('m', true); return; }
   if (e.button === 0) {
     if (!me.alive) { // cycle spectate target
       const alive = [...G.players.values()].filter(p => p.alive && p.team === me.team);
@@ -679,7 +892,7 @@ addEventListener('mousedown', e => {
     } else { L.mouse = true; L.edge = true; }
   } else if (e.button === 2 && me.alive && W[curWid()].scope && L.rl <= 0) L.scoped = !L.scoped;
 });
-addEventListener('mouseup', e => { if (e.button === 0) L.mouse = false; });
+addEventListener('mouseup', e => { if (e.button === 0) L.mouse = false; if (e.button === 4) useGadget('m', false); });
 addEventListener('contextmenu', e => e.preventDefault());
 addEventListener('mousemove', e => {
   if (!locked || !started) return;
@@ -700,6 +913,7 @@ function beginPlay() {
   if (started) return;
   started = true;
   $('menu').classList.add('hidden'); $('hud').classList.remove('hidden'); $('pause').classList.remove('hidden');
+  try { history.pushState({ ws: 1 }, '', location.href); } catch (_) { /* sandboxed frame: nothing to guard */ }
   setVM(curWid());
   initAudio();
   if (G.rs.phase === 'freeze') setOps(true);   // join during prep: open operator select straight away
@@ -764,7 +978,7 @@ function loop(now) {
   if (G.isHost) Host.tick(dt);
   if (G.rs.tm > 0) G.rs.tm = Math.max(0, G.rs.tm - dt);
   if (G.rs.bomb && G.rs.bomb.s === 'planted') G.rs.bomb.t = Math.max(0, G.rs.bomb.t - dt);
-  localUpdate(dt); syncEnts(dt); fxUpdate(dt);
+  localUpdate(dt); syncEnts(dt); syncObjs(); fxUpdate(dt);
   renderer.render(scene, cam);
   hudT += dt; if (hudT > .06) { hud(hudT); hudT = 0; drawMini(); }
 }
