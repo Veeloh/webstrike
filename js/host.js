@@ -3,7 +3,7 @@
 // Internal team ids: 'T' = Attack, 'CT' = Defense. A team id is the *side* a player is on right now.
 // Players also belong to a squad (p.sq = 0 or 1) that stays together and swaps sides every SWAP_EVERY rounds.
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, GADGETS, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, smokeCut, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld } from './data.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, smokeCut, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld, MAPS, MAPINFO, loadMap, watchPoint } from './data.js';
 import { createGadgets } from './gadgets.js';
 
 export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8, SWAP_EVERY = 3;
@@ -142,10 +142,19 @@ function startRound() {
   sendMeta();                                  // before 'spawn' so clients already know their new side and loadout
   bcast({ t: 'spawn', sid: H.sid, swap: swap ? 1 : 0, l: list().map(p => [p.id, p.x, p.z, p.yaw]) });
   const final = H.sc[0] === MAXR - 1 && H.sc[1] === MAXR - 1;
-  bcast({ t: 'msg', text: swap ? 'SIDES SWAP' : final ? 'FINAL ROUND — prep phase (B: operator)' : `Round ${H.round} — prep phase (B: operator)`, short: swap ? 0 : 1, swap: swap ? 1 : 0 });
+  bcast({ t: 'msg', text: swap ? 'SIDES SWAP' : final ? 'FINAL ROUND — prep phase (B: operator)' : `${H.round === 1 ? MAPINFO.name + ' — ' : ''}Round ${H.round} — prep phase (B: operator)`, short: swap ? 0 : 1, swap: swap ? 1 : 0 });
   sendRS(); gad.sendGS();
 }
+// Pick the map for a new match (fixed, or a random one different from the last) and tell everybody before the round starts.
+function pickMap() {
+  const ids = MAPS.map(m => m.id);
+  let id = ids.includes(H.mapPref) ? H.mapPref : null;
+  if (!id) { const pool = ids.filter(i => i !== H.lastMap); id = pool[Math.random() * pool.length | 0]; }
+  H.lastMap = id; loadMap(id);
+  bcast({ t: 'map', id });
+}
 function startMatch() {
+  pickMap();
   H.round = 1; H.sc = [0, 0]; H.over = false;
   if (H.sq1 !== 'T') { H.sq1 = 'T'; for (const p of list()) { p.team = sideOf(p.sq); p.op = null; } }   // a new match starts on the original sides
   for (const p of list()) { p.k = 0; p.d = 0; p.alive = false; }
@@ -329,7 +338,7 @@ function botThink(b, dt) {
   else { a.lost += dt; if (a.lost > 1.2) a.tgt = null; }
 
   // Gadget rules (one per operator, see gadgets.js). The point a defender watches from its hold spot depends on which hold it has.
-  gad.bot(b, dt, { tgt, bd: tgt ? bd : 0, atEnd: a.pi >= a.path.length, thr: b.x < -8 * SCALE ? [-22 * SCALE, -8 * SCALE] : b.x > 8 * SCALE ? [20 * SCALE, 6 * SCALE] : [0, 8 * SCALE] });
+  gad.bot(b, dt, { tgt, bd: tgt ? bd : 0, atEnd: a.pi >= a.path.length, thr: watchPoint(b.x) });
 
   let mvx = 0, mvz = 0, want = false, speed = 4.3, gx = null, gz = null;
   const holding = H.holds[b.id];
@@ -408,6 +417,7 @@ function botThink(b, dt) {
 // ---------- API ----------
 export function init(o = {}) {
   H.size = o.size || 5; H.botsOn = o.bots !== false; H.headless = !!o.headless;
+  H.mapPref = o.map || 'rotate'; H.lastMap = null;   // 'rotate' = a different map every match, or a fixed map id
   H.log = []; H.whp = new Map(); resetWorld(); gad.resetRound();
   H.sq1 = 'T'; H.sc = [0, 0];
   H.level = o.level ?? .4; H.levelFn = o.levelFn || null;   // bot difficulty: fixed level, or a function re-read every round
@@ -435,6 +445,7 @@ export function onMsg(from, m) {
       fillBots();
       if (G.net) {
         G.net.sendTo(from, { t: 'welcome', id: from, team });
+        G.net.sendTo(from, { t: 'map', id: MAPINFO.id });
         if (H.log.length) G.net.sendTo(from, { t: 'world', ev: H.log });   // walls already broken / barricades placed this round
       }
       if (first && H.headless) { startMatch(); break; }
