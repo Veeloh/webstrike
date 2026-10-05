@@ -74,18 +74,16 @@ export const PREP_GADGETS = new Set(['shield', 'reinforce', 'beacon', 'mine', 'f
 export const LEAN_D = 0.6;
 
 // ---------------------------------------------------------------------------
-// MAP: "Roofline"
-// Layout coordinates below are in map units (x right, z down; 62 x 62, same as
-// the old map). Everything is multiplied by SCALE when turned into boxes.
+// MAPS. Two Siege-style compounds: hollow multi-room buildings with breakable walls, doorways you can
+// barricade, windows, reinforced walls around the objectives, and an enclosed Attack spawn outside.
 //
-//   Defense spawn  top centre (opens to the Plaza through a narrow Choke).
-//   Attack spawn   walled-off bottom-left corner (no sightline to Defense).
-//   Site A    top-left room.  Reached via West Alley, or Plaza -> Choke -> A Door.
-//   Site B    right-side room. Reached via East Yard, Plaza -> B Door, or North Hall.
+//   Villa  a country house: central hall + lobby, four wing rooms, Site A in the NW library, Site B in the east study.
+//   Bank   a bank: wide public lobby, a reinforced vault core (Site A), back offices, Site B in the executive office.
 //
-// Every wall mass is a hollow, roofed building: shell walls with windows, doorways
-// you can walk through, and a (render-only) gabled roof. Windows are glass boxes:
-// they block movement but not bullets or line of sight (see castWorld).
+// Layout coordinates (map units, x right, z down, 62 x 62: x -29..29, z -29..30) are multiplied by SCALE when
+// turned into boxes. Both maps share the same footprint, so floor / fog / minimap code does not care which is loaded.
+// loadMap(id) rebuilds the shared arrays below IN PLACE (BOXES, DOORS, SITES, SPAWNS, ...), so every module that imported
+// them keeps seeing the current map. The build is deterministic: BOXES indices match on every client.
 //
 // Box flags:
 //   c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays), 4 = barricade, 5 = deployable shield (sh = uid)
@@ -97,13 +95,18 @@ export const LEAN_D = 0.6;
 const HB = 5, WIN_Y0 = 1.1, WIN_Y1 = 2.7, WALL_T = 0.5, WIN_W = 1.4;
 const DOOR_W = 1.0, DOOR_H = 2.8;   // doorway: width in layout units (x SCALE), height in world units
 const HOLE_W = 3.2, HOLE_H = 2.8;   // size of the hole carved into a breakable wall (world units)
-const ROOF_OH = 0.4, ROOF_RISE = 1.6;
+const ROOF_OH = 0.4;
 
 export const DOORS = [];       // doorway openings: { x, z, bi } (world centre, index of its barricade box)
-
-// Sites in layout units; reinforced walls are chosen from these.
-const SITE_L = { A: [-21, -19, 6], B: [22, 4, 6] };
-export const SITES = Object.fromEntries(Object.entries(SITE_L).map(([k, [x, z, r]]) => [k, { x: x * SCALE, z: z * SCALE, r: r * SCALE }]));
+export const SITES = {};       // { A: { x, z, r }, B: ... } world units
+export const BOXES = [];
+export const BUILDINGS = [];   // footprints in world units (for the minimap)
+export const ROOFS = [];       // render-only gabled roofs, world units
+export const SPAWNS = { T: [], CT: [] };
+export const ROUTES = { A: [], B: [] };          // T attack routes: several per site, each a waypoint chain
+export const HOLDS = { A: [], B: [], M: [] };    // CT hold routes: waypoint chains ending at the hold position
+export const MAPINFO = { id: '', name: '', split: 8 * SCALE, thr: { W: [0, 0], E: [0, 0], M: [0, 0] } };
+let BASE = 0, NAV = [], ADJ = [];
 
 function B(x, y, z, w, h, d, c = 0) {
   x *= SCALE; z *= SCALE; w *= SCALE; d *= SCALE;
@@ -116,39 +119,8 @@ function wbox(x0, y0, z0, x1, y1, z1, c = 0) {
   return { x: (x0 + x1) / 2, y: y0, z: (z0 + z1) / 2, w: x1 - x0, h: y1 - y0, d: z1 - z0, c, x0, x1, y0, y1, z0, z1 };
 }
 
-export const BOXES = [];
-export const BUILDINGS = [];   // footprints in world units (for the minimap)
-export const ROOFS = [];       // render-only gabled roofs, world units
-
-// Map boundary (inner faces at x = +-29, z = -29 and z = 30)
-BOXES.push(B(0, 0, -29.5, 61, 6, 1), B(0, 0, 30.5, 61, 6, 1), B(-29.5, 0, 0.5, 1, 6, 62), B(29.5, 0, 0.5, 1, 6, 62));
-
-// [x0, z0, x1, z1] footprints
-const BLD = [
-  [-20, -12, -13, 16],                                                    // Alley Block (west of Plaza)
-  [-13, -29, -8, -24], [-13, -19, -8, -12],                               // CT annexes either side of A Door
-  [-8, -18, -3, -14], [1, -18, 8, -14],                                   // Choke buildings
-  [8, -29, 12, -26], [8, -21, 12, -14], [8, -14, 12, -4],                 // North Hall west wall (CT door gap z -26..-21)
-  [10, -4, 14, 2], [10, 7, 14, 12],                                       // B West (B Door gap z 2..7)
-  [14, -8, 18, -4], [26, -8, 29, -4],                                     // B Gate (opening x 18..26)
-  [22, 11, 29, 15],                                                       // B South (East Yard opening x 16..22)
-  [-17, 16, -3, 22], [3, 16, 12, 22],                                     // T Band (Mid Door gap x -3..3)
-  [12, 12, 16, 22],                                                       // Yard Block
-  [18, -20, 21, -12],                                                     // Hall Hut
-  [-29, 8, -23.5, 14], [-25.5, -4, -20, 2],                               // Warehouses: stagger West Alley into an S-bend (no spawn -> A sightline)
-  [-17, 27, -12, 30],                                                     // Depot (south side of T spawn exit)
-];
-
-// Window centres along a face. Opposite faces use different phases (.25 vs .75) so windows never line up
-// straight across a building: no long axis-aligned sightlines through a hollow shell.
-function wins(lo, hi, ph) {
-  const L = hi - lo, k = Math.floor(L / 4.5), r = [];
-  for (let i = 0; i < k; i++) r.push(lo + (i + ph) * L / k);
-  return r;
-}
-// One wall strip: thin axis a0..a1, running lo..hi, with window centres `ws` (sorted)
-// and doorway centres `ds`. Windows that would overlap a doorway are dropped.
-// rf = reinforced building (its walls cannot be broken).
+// One wall strip: thin axis a0..a1, running lo..hi, with window centres `ws` and doorway centres `ds`
+// (both along the run). Windows that would overlap a doorway are dropped. rf = reinforced (cannot be broken).
 function strip(horiz, a0, a1, lo, hi, ws, ds, rf) {
   const mk = (p0, p1, y0, y1, c = 0) => {
     const b = horiz ? S(p0, a0, p1, a1, y0, y1, c) : S(a0, p0, a1, p1, y0, y1, c);
@@ -176,64 +148,204 @@ function strip(horiz, a0, a1, lo, hi, ws, ds, rf) {
   }
   if (hi > cur) BOXES.push(wall(cur, hi));
 }
-// Door phase per face. Opposite faces use different phases so doors never line up
-// straight across a building (same idea as the windows).
-const DOOR_PH = { N: .35, S: .65, W: .35, E: .65 };
-function building(self) {
-  const [x0, z0, x1, z1] = self, t = WALL_T, mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
-  // windows only on faces that look at open ground (not another building, not the map edge)
-  const adj = (px, pz) => BLD.some(o => o !== self && px > o[0] && px < o[2] && pz > o[1] && pz < o[3]);
-  const okN = z0 > -28.9 && !adj(mx, z0 - .3), okS = z1 < 29.9 && !adj(mx, z1 + .3);
-  const okW = x0 > -28.9 && !adj(x0 - .3, mz), okE = x1 < 28.9 && !adj(x1 + .3, mz);
-  // Buildings next to a site are reinforced (their walls can't be broken).
-  const rf = Object.values(SITE_L).some(([sx, sz, sr]) => Math.hypot(cl(sx, x0, x1) - sx, cl(sz, z0, z1) - sz) <= sr + 3);
-  // Doorway for a face: first phase along the face where the whole opening (and a bit of
-  // approach space in front of it) is open ground. Returns [] if the face has no usable spot.
-  const doorFor = face => {
-    const horiz = face === 'N' || face === 'S';
-    const a = horiz ? x0 : z0, b = horiz ? x1 : z1;
-    const lo = a + t + DOOR_W / 2 + .15, hi = b - t - DOOR_W / 2 - .15;
-    if (hi < lo) return [];
-    const off = face === 'N' ? z0 - .8 : face === 'S' ? z1 + .8 : face === 'W' ? x0 - .8 : x1 + .8;
-    if (!(horiz ? off > -28.9 && off < 29.9 : off > -28.9 && off < 28.9)) return [];
-    for (const f of [DOOR_PH[face], .5, .25, .75]) {
-      const c = cl(a + f * (b - a), lo, hi);
-      if ([c - DOOR_W / 2, c, c + DOOR_W / 2].every(p => !(horiz ? adj(p, off) : adj(off, p)))) return [c];
-    }
-    return [];
-  };
-  strip(true, z0, z0 + t, x0, x1, okN ? wins(x0, x1, .25) : [], doorFor('N'), rf);
-  strip(true, z1 - t, z1, x0, x1, okS ? wins(x0, x1, .75) : [], doorFor('S'), rf);
-  strip(false, x0, x0 + t, z0 + t, z1 - t, okW ? wins(z0, z1, .25) : [], doorFor('W'), rf);
-  strip(false, x1 - t, x1, z0 + t, z1 - t, okE ? wins(z0, z1, .75) : [], doorFor('E'), rf);
-  BUILDINGS.push({ x0: x0 * SCALE, z0: z0 * SCALE, x1: x1 * SCALE, z1: z1 * SCALE });
-  const w = x1 - x0, d = z1 - z0, alongX = w >= d, short = Math.min(w, d);
-  ROOFS.push({
-    x: mx * SCALE, z: mz * SCALE, y: HB,
-    alongX, len: (alongX ? w : d) * SCALE + ROOF_OH * 2 * SCALE,
-    hw: (short / 2 + ROOF_OH) * SCALE, rise: ROOF_RISE,
-  });
+// A wall run on a centre line. dir 'H' runs along x at z = pos, 'V' runs along z at x = pos; a..b are the run's end centre lines.
+// flags: 'i' = ends butt into other walls (shell corners leave it off so they overlap), 'r' = reinforced.
+function wallRun(dir, pos, a, b, flags, ws, ds) {
+  const t = WALL_T, inner = flags.includes('i'), rf = flags.includes('r');
+  const lo = inner ? a + t / 2 : a - t / 2, hi = inner ? b - t / 2 : b + t / 2;
+  strip(dir === 'H', pos - t / 2, pos + t / 2, lo, hi, ws, ds, rf);
 }
-for (const b of BLD) building(b);
 
-// Crates: [cx, cz, w, d, h]
-for (const [cx, cz, w, d, h] of [
-  [-24, -22, 3, 3, 1.6], [-17, -16, 2, 2, 1.2],                      // Site A
-  [-27, 17, 2, 2, 1.2], [-27, -9, 2, 2, 1.2],                        // West Alley
-  [-3, 2, 4, 4, 1.2], [5, 8, 2, 2, 1.2], [-8, -4, 2, 2, 1.2], [5, -6, 2, 2, 1.2],   // Plaza
-  [24, 6.5, 3, 3, 1.6], [17, 0, 2, 2, 1.2], [27, 0.5, 2, 2, 1.2],     // Site B
-  [24, -14, 3, 3, 1.6], [16, -22, 2, 2, 1.2], [22, -24, 2, 2, 1.2],  // North Hall
-  [24, 19.5, 3, 3, 1.6], [18, 26.5, 2, 2, 1.2],                      // East Yard
-  [8, 26.5, 3, 2, 1.2], [-2, 28.2, 3, 2, 1.2],                       // South Lane
-  [-26, 20, 2, 1.6, 1.2],                                            // T spawn
-]) BOXES.push(B(cx, 0, cz, w, h, d, 1));
+// ---- the maps -----------------------------------------------------------------
+// walls : [dir, pos, a, b, flags, windows[], doors[]]
+// solid : [x0, z0, x1, z1] plain unbreakable fences (the Attack spawn compound, which has open gaps instead of doors)
+// bld   : [x0, z0, x1, z1] roofed footprints (minimap + roofs)
+// crates: [cx, cz, w, d, h]
+// routes/holds: key points (layout units); the loader fills in the waypoints between them with the nav graph.
+const VILLA = {
+  id: 'villa', name: 'Villa',
+  sites: { A: [-13, -16, 4.6], B: [13, -5.5, 4] },
+  walls: [
+    // shell: 36 x 30
+    ['H', -22, -18, 18, '', [-13, -4, 13], [3]],              // north: library, hall, north-east room windows; rear door into the hall
+    ['H', 8, -18, 18, '', [-15, -11, 11, 15], [-2]],          // south: front door into the lobby, windows on both wings
+    ['V', -18, -22, 8, 'i', [-5, -19], [3, -15]],             // west: doors into the library and the south-west room
+    ['V', 18, -22, 8, 'i', [-17, 3], [-5]],                   // east: door into the study
+    // hall / lobby partition and wing walls (the two walls shielding the hall from the site rooms are reinforced)
+    ['V', -8, -22, -10, 'ir', [], [-15]],
+    ['V', -8, -10, 8, 'i', [], [-4, 4]],
+    ['V', 8, -22, -10, 'ir', [], [-15]],
+    ['V', 8, -10, 8, 'i', [], [-6, 3]],
+    ['H', -10, -18, -8, 'i', [], [-14]],
+    ['H', -1, -18, -8, 'i', [], [-12]],
+    ['H', -10, 8, 18, 'i', [], [14]],
+    ['H', -1, 8, 18, 'i', [], [11]],
+    ['H', -8, -8, 8, 'i', [], [-5, 5]],
+    // garage (east yard) and tool shed (west yard)
+    ['H', 11, 22, 28, '', [], [25]], ['H', 19, 22, 28, '', [25], []], ['V', 22, 11, 19, 'i', [], [15]], ['V', 28, 11, 19, 'i', [], []],
+    ['H', -8, -28, -22, '', [-25], []], ['H', 0, -28, -22, '', [], [-24.5]], ['V', -28, -8, 0, 'i', [], []], ['V', -22, -8, 0, 'i', [], [-4]],
+  ],
+  // Attack compound at the south edge: exits north, west and east
+  solid: [[-9.25, 20.75, -8.75, 24], [-9.25, 27, -8.75, 30], [8.75, 20.75, 9.25, 24], [8.75, 27, 9.25, 30], [-9.25, 20.75, -3, 21.25], [3, 20.75, 9.25, 21.25]],
+  bld: [[-18, -22, 18, 8], [22, 11, 28, 19], [-28, -8, -22, 0]],
+  crates: [
+    [-4, -3, 2, 2, 1.2], [4, 2, 2, 2, 1.2],                                   // lobby
+    [-15, -19.5, 2, 2, 1.2], [16, -3, 2, 2, 1.2], [13, -17, 2, 2, 1.2],      // library, study, north-east room
+    [-15, 3, 2, 2, 1.2], [15, 3, 2, 2, 1.2],                                  // south wing rooms
+    [-13, 15, 2.5, 2.5, 1.2], [12, 16, 2.5, 2.5, 1.6], [0, 13, 2, 2, 1.2],  // front yard
+    [-25, 12, 2, 2, 1.2], [-25, -14, 2, 2, 1.2], [-26, -24, 3, 2, 1.2],     // west yard
+    [25, 3, 2, 2, 1.2], [25, -8, 3, 3, 1.6], [24, -18, 2, 2, 1.2],          // east yard
+    [-6, -26, 3, 2, 1.2], [6, -26, 3, 2, 1.2], [22, -26, 2, 2, 1.2],        // rear garden
+  ],
+  spawns: {
+    T: { pts: [[-6, 28], [-3, 28], [0, 28], [3, 28], [6, 28], [-6, 25.5], [-3, 25.5], [0, 25.5], [3, 25.5], [6, 25.5]], yaw: 0 },
+    CT: { pts: [[-6, -20], [-3, -20], [0, -20], [3, -20], [6, -20], [-6, -15], [-3, -15], [0, -15], [3, -15], [6, -15]], yaw: Math.PI },
+  },
+  routes: {
+    A: [[[0, 25], [-8, 25.5], [-20, 16], [-20, -8], [-20, -15], [-13, -16]],     // west yard -> library door
+        [[0, 25], [-2, 10], [-6, -5.5], [-13, -14]]],                            // front door -> lobby -> west wing -> library
+    B: [[[0, 25], [8, 25.5], [20, 14], [20, 0], [20, -5], [13, -5.5]],           // east yard -> study door
+        [[0, 25], [-2, 10], [2, 2], [5, -4], [13, -5.5]]],                       // front door -> lobby -> study
+  },
+  holds: {
+    A: [[0, -16], [-5, -15], [-13, -16]],
+    B: [[0, -16], [5, -12], [5, -4], [13, -5.5]],
+    M: [[0, -16], [5, -10], [0, 2]],
+  },
+  thr: { W: [-20, 10], E: [20, 10], M: [0, 18] },
+};
+
+const BANK = {
+  id: 'bank', name: 'Bank',
+  sites: { A: [0, -4, 3.4], B: [14.5, -13.5, 4] },
+  walls: [
+    // shell: 40 x 30
+    ['H', -18, -20, 20, '', [-14, -4, 15], [4]],              // north: records room, back hall, executive office; rear door into the back hall
+    ['H', 12, -20, 20, '', [-17, -6, 2, 16], [-12, 9]],       // south: two front doors into the public lobby
+    ['V', -20, -18, 12, 'i', [-14, 5, 9], [-4]],              // west: staff room door
+    ['V', 20, -18, 12, 'i', [-2, 5, 9], [-14, -5]],           // east: executive office door and manager office door
+    // lobby / back-row divider
+    ['H', 1, -20, -6, 'i', [], [-14, -7.5]],
+    ['H', 1, 6, 20, 'i', [], [7.5, 14]],
+    // vault core (reinforced): one door to the lobby, one to the back hall
+    ['H', 1, -6, 6, 'r', [], [2]],
+    ['H', -9, -6, 6, 'r', [], [-2.5]],
+    ['V', -6, -9, 1, 'ir', [], []],
+    ['V', 6, -9, 1, 'ir', [], []],
+    // back-row side walls: corridors run beside the vault
+    ['V', -9, -18, 1, 'i', [], [-14, -4]],
+    ['V', 9, -18, 1, 'i', [], [-13, -5]],
+    ['H', -9, -20, -9, 'i', [], [-15]],
+    ['H', -9, 9, 20, 'i', [], [15]],
+    // outbuildings: cafe (west plaza), kiosk (centre), generator shed (east yard), loading dock (rear)
+    ['H', 16, -28, -22, '', [-25], []], ['H', 24, -28, -22, '', [], [-24.5]], ['V', -28, 16, 24, 'i', [], []], ['V', -22, 16, 24, 'i', [], [20]],
+    ['H', 18, -3, 3, '', [], [1.5]], ['H', 22, -3, 3, '', [], [-1.5]], ['V', -3, 18, 22, 'i', [], []], ['V', 3, 18, 22, 'i', [], []],
+    ['H', -10, 24.5, 28.5, '', [], [26.5]], ['H', -2, 24.5, 28.5, '', [], []], ['V', 24.5, -10, -2, 'i', [], [-6]], ['V', 28.5, -10, -2, 'i', [], []],
+    ['H', -27, -28, -22, '', [-25], []], ['H', -20, -28, -22, '', [], [-24]], ['V', -28, -27, -20, 'i', [], []], ['V', -22, -27, -20, 'i', [], [-23.5]],
+  ],
+  // Attack compound in the south-east corner: exits west and north
+  solid: [[13.75, 19.75, 14.25, 25], [13.75, 28, 14.25, 30], [13.75, 19.75, 22, 20.25], [26, 19.75, 29, 20.25]],
+  bld: [[-20, -18, 20, 12], [-28, 16, -22, 24], [-3, 18, 3, 22], [24.5, -10, 28.5, -2], [-28, -27, -22, -20]],
+  crates: [
+    [-13, 4, 8, 1.2, 1.1], [13, 4, 8, 1.2, 1.1],                              // teller counters
+    [3, -6, 2, 2, 1.2], [-4, -2, 2, 2, 1.2],                                  // vault
+    [-14, -14, 2, 2, 1.2], [-15, -3, 2, 2, 1.2], [15, -3, 2, 2, 1.2], [17.5, -11.5, 2, 2, 1.2],   // offices
+    [-12, 18, 2.5, 2.5, 1.2], [8, 17, 2, 2, 1.2], [-8, 22, 2, 2, 1.2], [-18, 24, 2, 2, 1.2],    // plaza
+    [26, 13, 2.5, 2.5, 1.2], [26, 4, 2, 2, 1.2], [-24, -4, 2, 2, 1.2],                          // side yards
+    [-8, -24, 3, 2, 1.2], [8, -24, 3, 2, 1.2], [20, -24, 2, 2, 1.2],                            // back alley
+  ],
+  spawns: {
+    T: { pts: [[16.5, 28], [19, 28], [21.5, 28], [24, 28], [26.5, 28], [16.5, 25.5], [19, 25.5], [21.5, 25.5], [24, 25.5], [26.5, 25.5]], yaw: 0.785 },
+    CT: { pts: [[-6, -16.5], [-3, -16.5], [0, -16.5], [3, -16.5], [6, -16.5], [-6, -12.5], [-3, -12.5], [0, -12.5], [3, -12.5], [6, -12.5]], yaw: Math.PI },
+  },
+  routes: {
+    A: [[[21, 25], [24, 18], [11, 15], [9, 8], [2, 4], [0, -4]],                               // east front door -> lobby -> vault door
+        [[21, 25], [16, 22], [0, 15], [-12, 15], [-12, 9], [-5, 4], [0, -4]]],                // west front door -> lobby -> vault door
+    B: [[[21, 25], [24, 18], [11, 15], [9, 8], [18, 3], [14.5, -5], [14.5, -13]],              // lobby -> manager office -> executive office
+        [[21, 25], [23, 18], [22.3, 2], [22.3, -14], [14.5, -13.5]]],                          // east yard -> executive office door
+  },
+  holds: {
+    A: [[0, -14], [-2, -11], [0, -4]],
+    B: [[0, -14], [9, -13], [14.5, -13.5]],
+    M: [[0, -14], [-7.5, -8], [-7.5, -2]],
+  },
+  thr: { W: [-12, 14], E: [12, 14], M: [0, 16] },
+};
+export const MAPS = [VILLA, BANK];
+
+function freeAt(x, z, pad) {
+  for (const b of BOXES) if (!b.off && b.y0 < H_STAND && x + pad > b.x0 && x - pad < b.x1 && z + pad > b.z0 && z - pad < b.z1) return false;
+  return true;
+}
+// Navigation graph for bots going somewhere off their scripted routes (e.g. to a planted bomb): a coarse grid of
+// free spots plus three nodes at every doorway (in front, in it, behind it). Edges exist wherever the straight line is walkable.
+function buildNav() {
+  NAV = [];
+  const GS = 4 * SCALE;
+  for (let x = -28 * SCALE; x <= 28 * SCALE; x += GS) for (let z = -28 * SCALE; z <= 29 * SCALE; z += GS) if (freeAt(x, z, 1.6)) NAV.push([x, z]);
+  for (const d of DOORS) {
+    const b = BOXES[d.bi], alongX = b.w >= b.d, off = (alongX ? b.d : b.w) / 2 + 1.7;
+    for (const s of [-1, 0, 1]) {
+      const x = d.x + (alongX ? 0 : s * off), z = d.z + (alongX ? s * off : 0);
+      if (freeAt(x, z, PR)) NAV.push([x, z]);
+    }
+  }
+  ADJ = NAV.map(() => []);
+  for (let i = 0; i < NAV.length; i++) for (let j = i + 1; j < NAV.length; j++) {
+    const d = Math.hypot(NAV[i][0] - NAV[j][0], NAV[i][1] - NAV[j][1]);
+    if (d <= 16 * SCALE && segClear(NAV[i][0], NAV[i][1], NAV[j][0], NAV[j][1])) { ADJ[i].push([j, d]); ADJ[j].push([i, d]); }
+  }
+}
+// Key points (layout units) -> a full waypoint chain: the first point, then the nav path between each pair.
+function expand(keys) {
+  const k = keys.map(([x, z]) => [x * SCALE, z * SCALE]), out = [k[0]];
+  for (let i = 1; i < k.length; i++) out.push(...navPath(k[i - 1][0], k[i - 1][1], k[i][0], k[i][1]));
+  return out;
+}
+
+// Switch the shared world arrays to map `id`. Returns false when that map is already loaded.
+export function loadMap(id) {
+  const def = MAPS.find(m => m.id === id) || MAPS[0];
+  if (MAPINFO.id === def.id) return false;
+  BOXES.length = 0; DOORS.length = 0; BUILDINGS.length = 0; ROOFS.length = 0;
+  SHIELDS.clear(); SMOKES.length = 0;
+  for (const k in SITES) delete SITES[k];
+  for (const k in def.sites) { const [x, z, r] = def.sites[k]; SITES[k] = { x: x * SCALE, z: z * SCALE, r: r * SCALE }; }
+
+  // Map boundary (inner faces at x = +-29, z = -29 and z = 30)
+  BOXES.push(B(0, 0, -29.5, 61, 6, 1), B(0, 0, 30.5, 61, 6, 1), B(-29.5, 0, 0.5, 1, 6, 62), B(29.5, 0, 0.5, 1, 6, 62));
+  for (const [dir, pos, a, b, flags, ws, ds] of def.walls) wallRun(dir, pos, a, b, flags, ws, ds);
+  for (const [x0, z0, x1, z1] of def.solid) BOXES.push(S(x0, z0, x1, z1, 0, HB));
+  for (const [x0, z0, x1, z1] of def.bld) {
+    const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0, alongX = w >= d, short = Math.min(w, d);
+    BUILDINGS.push({ x0: x0 * SCALE, z0: z0 * SCALE, x1: x1 * SCALE, z1: z1 * SCALE });
+    ROOFS.push({
+      x: mx * SCALE, z: mz * SCALE, y: HB, alongX, len: (alongX ? w : d) * SCALE + ROOF_OH * 2 * SCALE,
+      hw: (short / 2 + ROOF_OH) * SCALE, rise: Math.min(4, Math.max(1.6, short * 0.15)),
+    });
+  }
+  for (const [cx, cz, w, d, h] of def.crates) BOXES.push(B(cx, 0, cz, w, h, d, 1));
+  BASE = BOXES.length;
+
+  for (const side of ['T', 'CT']) {
+    SPAWNS[side].length = 0;
+    for (const [x, z] of def.spawns[side].pts) SPAWNS[side].push([x * SCALE, z * SCALE, def.spawns[side].yaw]);
+  }
+  buildNav();
+  for (const k in ROUTES) { ROUTES[k].length = 0; for (const r of def.routes[k]) ROUTES[k].push(expand(r)); }
+  for (const k in HOLDS) { HOLDS[k].length = 0; HOLDS[k].push(...expand(def.holds[k])); }
+  MAPINFO.id = def.id; MAPINFO.name = def.name; MAPINFO.split = 8 * SCALE;
+  for (const k of ['W', 'E', 'M']) MAPINFO.thr[k] = [def.thr[k][0] * SCALE, def.thr[k][1] * SCALE];
+  return true;
+}
+// Where a bot standing at world x watches / throws its gadgets: west side, east side or the middle of the map.
+export function watchPoint(x) { return x < -MAPINFO.split ? MAPINFO.thr.W : x > MAPINFO.split ? MAPINFO.thr.E : MAPINFO.thr.M; }
 
 // ---------------------------------------------------------------------------
 // DESTRUCTION. BOXES indices are the same on every client (the map is built deterministically), so the
 // host only has to send small events: { k:'hole', i, x, z }, { k:'barr', d, on }, { k:'reset' }.
 // Boxes are never removed during a round, only switched off; carved pieces are appended in event order.
 // ---------------------------------------------------------------------------
-const BASE = BOXES.length;
 
 // Carve a doorway-sized hole out of breakable wall box i around (px, pz). Idempotent.
 export function carve(i, px, pz) {
@@ -297,46 +409,6 @@ export function applyWorld(ev) {
   else if (ev.k === 'rf') { const b = BOXES[ev.i | 0]; if (b && b.brk && !b.rf) { b.rf = true; b.rfx = true; } }   // Reinforcer
 }
 
-const pt = (x, z) => [x * SCALE, z * SCALE];
-const sp = (list, yaw) => list.map(([x, z]) => [x * SCALE, z * SCALE, yaw]);
-export const SPAWNS = {
-  // T (Attack): walled corner, facing the exits (north-east)
-  T: sp([[-26, 29], [-23.5, 29], [-21, 29], [-18.5, 29], [-27, 27], [-24.5, 27], [-22, 27], [-19.5, 27], [-27, 24.5], [-24, 24.5]], -0.7),
-  // CT (Defense): top centre, facing south
-  CT: sp([[-6, -28.2], [-3, -28.2], [0, -28.2], [3, -28.2], [6, -28.2], [-6, -21.5], [-3, -21.5], [0, -21.5], [3, -21.5], [6, -21.5]], Math.PI),
-};
-// T attack routes: several per site, each a waypoint chain (bots walk straight between waypoints).
-export const ROUTES = {
-  A: [
-    [pt(-22.5, 19.5), pt(-21.5, 11), pt(-22, 5), pt(-27.5, 3), pt(-27.5, -5), pt(-23, -10), pt(-22, -15.5), pt(-21, -19)],   // West Alley (S-bend)
-    [pt(-19, 24.2), pt(-6, 24.5), pt(0, 23.5), pt(0, 19), pt(0, 12), pt(0, -5), pt(-1, -13), pt(-1, -19.5),
-     pt(-5, -21.5), pt(-10.5, -21.5), pt(-17, -19.5), pt(-20, -19)],                                    // Mid -> Choke -> A Door
-  ],
-  B: [
-    [pt(-19, 24.2), pt(10, 23.2), pt(18.5, 22.5), pt(19, 16), pt(19.5, 9), pt(20.5, 5.5)],              // East Yard
-    [pt(-19, 24.2), pt(-6, 24.5), pt(0, 23.5), pt(0, 19), pt(0, 12), pt(1, 6), pt(9, 4.5), pt(12, 4.5), pt(17, 4.5), pt(20, 4.5)],   // Mid -> B Door
-  ],
-};
-// CT hold routes: waypoint chains ending at the hold position.
-export const HOLDS = {
-  A: [pt(-4, -22), pt(-10.5, -21.5), pt(-17, -19)],
-  B: [pt(6, -22), pt(10, -23.5), pt(14, -20), pt(16, -11), pt(22, -8), pt(21, -1)],
-  M: [pt(-1, -21), pt(-1, -10)],
-};
-
-// Navigation graph for bots going somewhere off their scripted routes (e.g. to a planted bomb).
-// Edges are generated automatically wherever the straight line between two nodes is walkable.
-const NAV = [
-  [-23, 25], [-14.5, 24.5], [-6, 24.5], [0, 24], [10, 23.4], [18.5, 22.5],
-  [27, 23], [27, 17.5], [20, 28.5], [19, 17], [19.5, 9], [20.5, 5.5], [21, 0], [16, 5], [26, 3], [21, -2], [25, 10], [22, -7],
-  [0, 19], [0, 12], [1, 6], [-9, 8], [-10, 0], [-9, -9], [3, -3], [0, -10], [-1, -16], [-1, -21],
-  [9, 4.5], [12, 4.5], [14, 6], [5, 14],
-  [-5, -22], [5, -22], [0, -25], [-10.5, -21.5],
-  [-17, -19], [-21, -19], [-20, -15], [-26, -18], [-22, -26], [-16, -25],
-  [-22.5, 19.5], [-21.5, 11], [-22, 5], [-27.5, 3], [-27.5, -5], [-23, -10], [-22, -14],
-  [10, -23.5], [14, -20], [16, -11], [22, -9], [25, -10], [26, -20], [15, -26], [27, -26],
-].map(([x, z]) => [x * SCALE, z * SCALE]);
-
 const PR = R + 0.15;
 export function segClear(x1, z1, x2, z2) {
   const lx = Math.min(x1, x2) - PR, hx = Math.max(x1, x2) + PR, lz = Math.min(z1, z2) - PR, hz = Math.max(z1, z2) + PR;
@@ -354,11 +426,6 @@ export function blockedAt(x, z) {
   // Buildings are enterable (doorways), so interiors are only blocked by the wall boxes below.
   for (const b of BOXES) if (!b.off && b.y0 < H_STAND && x + R > b.x0 && x - R < b.x1 && z + R > b.z0 && z - R < b.z1) return true;
   return false;
-}
-const ADJ = NAV.map(() => []);
-for (let i = 0; i < NAV.length; i++) for (let j = i + 1; j < NAV.length; j++) {
-  const d = Math.hypot(NAV[i][0] - NAV[j][0], NAV[i][1] - NAV[j][1]);
-  if (d <= 16 * SCALE && segClear(NAV[i][0], NAV[i][1], NAV[j][0], NAV[j][1])) { ADJ[i].push([j, d]); ADJ[j].push([i, d]); }
 }
 // Waypoints from (sx,sz) to (gx,gz), excluding the start, always ending at the goal.
 export function navPath(sx, sz, gx, gz) {
@@ -459,3 +526,6 @@ export function losClear(x1, y1, z1, x2, y2, z2) {
   const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1, d = Math.hypot(dx, dy, dz);
   return castWorld(x1, y1, z1, dx / d, dy / d, dz / d, d) >= d - 0.02;
 }
+
+// Load the default map (last, so the helpers above are all defined).
+loadMap(MAPS[0].id);
