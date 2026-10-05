@@ -1,7 +1,7 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, GADGETS, PREP_GADGETS, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, moveE, castWorldBox, rayPlayer, inSite, applyWorld, blockedAt, leanOff } from './data.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, PREP_GADGETS, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, MAPS, MAPINFO, loadMap, moveE, castWorldBox, rayPlayer, inSite, applyWorld, blockedAt, leanOff } from './data.js';
 import { Host, MAX_BARR, SQ_NAMES } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
@@ -75,26 +75,41 @@ function syncWorld() {
     if (b.c === 0) { const mt = b.rf ? rfMat : wallMat; if (bm[i].m.material !== mt) bm[i].m.material = mt; }   // Reinforcer turns a wall grey
   }
 }
-for (const b of BOXES) addBoxMesh(b);
-syncWorld();
-// Gabled roofs (render-only): triangular prism along the building's long axis.
-for (const r of ROOFS) {
-  const sh = new THREE.Shape(); sh.moveTo(-r.hw, 0); sh.lineTo(r.hw, 0); sh.lineTo(0, r.rise); sh.closePath();
-  const g = new THREE.ExtrudeGeometry(sh, { depth: r.len, bevelEnabled: false });
-  g.translate(0, 0, -r.len / 2);
-  if (r.alongX) g.rotateY(Math.PI / 2);
-  const m = new THREE.Mesh(g, roofMat); m.position.set(r.x, r.y, r.z); scene.add(m);
-  const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), roofEdgeMat); e.position.copy(m.position); scene.add(e);
+// The static scenery (wall boxes, roofs, site markers) is built from whatever map is loaded and rebuilt when the host
+// switches maps. Everything it adds is tracked so the old map can be removed completely.
+const mapObjs = [];
+let builtMap = null;
+function clearMapScene() {
+  for (const o of bm) { scene.remove(o.m); o.m.geometry.dispose(); if (o.e) { scene.remove(o.e); o.e.geometry.dispose(); } }
+  bm.length = 0;
+  for (const o of mapObjs) { scene.remove(o); o.geometry.dispose(); if (o.material.map) { o.material.map.dispose(); o.material.dispose(); } }
+  mapObjs.length = 0;
 }
-for (const k in SITES) {
-  const s = SITES[k];
-  const t = mkTex((x, w, h) => {
-    x.strokeStyle = 'rgba(230,60,40,.9)'; x.lineWidth = 8; x.beginPath(); x.arc(w / 2, h / 2, w / 2 - 8, 0, 7); x.stroke();
-    x.fillStyle = 'rgba(230,60,40,.85)'; x.font = 'bold 120px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(k, w / 2, h / 2 + 6);
-  }, 256, 256);
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(s.r * 2, s.r * 2), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
-  m.rotation.x = -Math.PI / 2; m.position.set(s.x, .03, s.z); scene.add(m);
+function buildMapScene() {
+  clearMapScene();
+  for (const b of BOXES) addBoxMesh(b);
+  syncWorld();
+  // Gabled roofs (render-only): triangular prism along the building's long axis.
+  for (const r of ROOFS) {
+    const sh = new THREE.Shape(); sh.moveTo(-r.hw, 0); sh.lineTo(r.hw, 0); sh.lineTo(0, r.rise); sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: r.len, bevelEnabled: false });
+    g.translate(0, 0, -r.len / 2);
+    if (r.alongX) g.rotateY(Math.PI / 2);
+    const m = new THREE.Mesh(g, roofMat); m.position.set(r.x, r.y, r.z); scene.add(m); mapObjs.push(m);
+    const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), roofEdgeMat); e.position.copy(m.position); scene.add(e); mapObjs.push(e);
+  }
+  for (const k in SITES) {
+    const s = SITES[k];
+    const t = mkTex((x, w, h) => {
+      x.strokeStyle = 'rgba(230,60,40,.9)'; x.lineWidth = 8; x.beginPath(); x.arc(w / 2, h / 2, w / 2 - 8, 0, 7); x.stroke();
+      x.fillStyle = 'rgba(230,60,40,.85)'; x.font = 'bold 120px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(k, w / 2, h / 2 + 6);
+    }, 256, 256);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(s.r * 2, s.r * 2), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
+    m.rotation.x = -Math.PI / 2; m.position.set(s.x, .03, s.z); scene.add(m); mapObjs.push(m);
+  }
+  builtMap = MAPINFO.id;
 }
+buildMapScene();
 
 // ---------------- gun models ----------------
 // Builds a small group of primitives per weapon id, giving each a distinct silhouette.
@@ -342,6 +357,7 @@ function onMetaMe() {
 function handle(m) {
   switch (m.t) {
     case 'welcome': G.myId = m.id; break;
+    case 'map': loadMap(m.id); if (builtMap !== MAPINFO.id) buildMapScene(); break;   // host switched maps (the host's own browser already loaded it)
     case 'meta': {
       const ids = new Set();
       for (const q of m.p) {
@@ -669,8 +685,9 @@ function drawMini() {
   const me = meObj(); if (!me) return;
   const sc = 140 / (62 * SCALE), X = x => (x + 31 * SCALE) * sc, Z = z => (z + 31 * SCALE) * sc;
   mctx.clearRect(0, 0, 140, 140);
-  mctx.fillStyle = '#9a8a62';
+  mctx.fillStyle = '#5c5238';
   for (const b of BUILDINGS) mctx.fillRect(X(b.x0), Z(b.z0), (b.x1 - b.x0) * sc, (b.z1 - b.z0) * sc);
+  for (const b of BOXES) if (!b.off && b.c !== 1 && b.c !== 5 && b.bar === undefined && b.y0 < 1) { mctx.fillStyle = b.rf ? '#a9b3c2' : '#d8c89c'; mctx.fillRect(X(b.x0), Z(b.z0), Math.max(1, b.w * sc), Math.max(1, b.d * sc)); }   // walls, grey = reinforced; carved holes and doorways show as gaps
   mctx.fillStyle = '#6f5a35';
   for (const b of BOXES) if (b.c === 1) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
   mctx.fillStyle = '#e8a13a';   // placed barricades
@@ -921,7 +938,7 @@ function beginPlay() {
 function cfg() {
   S.name = ($('name').value.trim() || 'Player').slice(0, 16);
   localStorage.ws_name = S.name;
-  return { name: S.name, team: $('team').value, size: +$('size').value };
+  return { name: S.name, team: $('team').value, size: +$('size').value, map: $('map').value };
 }
 // Bots scale with the host player's rank (re-read every round, so they keep up as you climb).
 function announceBots() { setTimeout(() => showCenter(`Bot difficulty: ${Rank.info.tier.name}`, 3), 400); }
@@ -955,6 +972,9 @@ function startClient(kind) {
     status('Connecting…'); net.joinWS(url);
   }
 }
+for (const m of MAPS) $('map').add(new Option(m.name, m.id));
+$('map').value = localStorage.ws_map || 'rotate'; if ($('map').selectedIndex < 0) $('map').value = 'rotate';
+$('map').onchange = e => { localStorage.ws_map = e.target.value; };
 $('name').value = S.name; $('sens').value = S.sens; $('vol').value = S.vol; setVolume(S.vol);
 $('sens').oninput = e => { S.sens = +e.target.value; localStorage.ws_sens = S.sens; };
 $('vol').oninput = e => { S.vol = +e.target.value; localStorage.ws_vol = S.vol; setVolume(S.vol); };
@@ -974,7 +994,7 @@ function loop(now) {
   const dt = Math.min(.05, (now - last) / 1000); last = now;
   if (!started) {
     const t = now / 1000 * .08;
-    cam.position.set(Math.sin(t) * 38, 14, Math.cos(t) * 38); cam.lookAt(0, 0, 0);
+    cam.position.set(Math.sin(t) * 75, 48, Math.cos(t) * 75); cam.lookAt(0, 0, 0);   // slow orbit over the whole compound
     renderer.render(scene, cam); return;
   }
   if (G.isHost) Host.tick(dt);
