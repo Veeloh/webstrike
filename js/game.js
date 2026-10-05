@@ -923,11 +923,13 @@ function cfg() {
   localStorage.ws_name = S.name;
   return { name: S.name, team: $('team').value, size: +$('size').value };
 }
+// Bots scale with the host player's rank (re-read every round, so they keep up as you climb).
+function announceBots() { setTimeout(() => showCenter(`Bot difficulty: ${Rank.info.tier.name}`, 3), 400); }
 function startSolo() {
   const c = cfg();
   G.isHost = true; G.net = null; G.send = m => Host.onMsg('h', m);
-  Host.init({ ...c, bots: true });
-  beginPlay();
+  Host.init({ ...c, bots: true, levelFn: () => Rank.level });
+  beginPlay(); announceBots();
 }
 function startHostP2P() {
   const c = cfg(); const code = ($('code').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')) || Math.random().toString(36).slice(2, 7).toUpperCase();
@@ -936,7 +938,7 @@ function startHostP2P() {
   net.onErr = e => status(e === 'unavailable-id' ? 'That room code is already in use. Try another.' : 'Network error: ' + e);
   net.onMsg = (from, m) => Host.onMsg(from, m);
   net.onLeave = id => Host.removePlayer(id);
-  net.onOpen = () => { Host.init({ ...c, bots: $('fill').checked }); beginPlay(); showCenter('Room code: ' + code + ' — share it with friends', 8); };
+  net.onOpen = () => { Host.init({ ...c, bots: $('fill').checked, levelFn: () => Rank.level }); beginPlay(); if ($('fill').checked) announceBots(); showCenter('Room code: ' + code + ' — share it with friends', 8); };
   net.hostP2P(code);
 }
 function startClient(kind) {
