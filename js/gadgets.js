@@ -226,7 +226,7 @@ export function createGadgets(ctx) {
     const g = GADGETS[b.gad], a = b.ai; if (!g || !a) return;
     // Ghost Walk: sneak in on approach, switch back (and give the bot a beat to draw its gun) the moment it sees someone.
     if (b.ghost && (s.tgt || s.atEnd || H.bomb.s !== 'none')) { cancelGhost(b); a.react = Math.max(a.react, .35); }
-    a.gt = (a.gt || 0) - dt; if (a.gt > 0) return; a.gt = .2;
+    a.gt = (a.gt || 0) - dt; if (a.gt > 0) return; a.gt = a.tune ? a.tune.think : .2;   // weaker bots decide slower
     switch (b.gad) {
       case 'smoke':   // spot an enemy down a long lane -> smoke the middle of it, then keep advancing
         if (s.tgt && s.bd > 8 * SCALE && ready(b, g)) use(b, { yaw: b.yaw, pitch: 0, d: s.bd * .45 });
