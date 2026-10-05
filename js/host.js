@@ -39,6 +39,12 @@ function behind(v, a) {
   const dx = a.x - v.x, dz = a.z - v.z, d = Math.hypot(dx, dz) || 1;
   return (-Math.sin(v.yaw) * dx - Math.cos(v.yaw) * dz) / d < -.35;
 }
+// Bot difficulty. level 0..1 (from the host player's rank) scales how well bots aim, react, keep their fire discipline,
+// land headshots and how quickly they make gadget decisions. Individual bots still vary a little (skill is randomised).
+export function botTuning(level) {
+  const l = clamp(+level || 0, 0, 1), lerp = (a, b) => a + (b - a) * l;
+  return { skill: lerp(.65, 1.6), cd: lerp(1.35, .85), hs: lerp(.06, .28), think: lerp(.8, .15) };
+}
 const gad = createGadgets({ H, list, bcast, worldEvent, inflict, tell });
 
 function bcast(m, except) {
@@ -230,7 +236,8 @@ function holdsTick(dt) {
 
 // ---------- bots ----------
 function botInit(b) {
-  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null, breach: null, breachT: 0, mv: null, did: 0, dn: 0, gt: 0 };
+  const tune = botTuning(H.levelFn ? H.levelFn() : H.level);
+  const a = b.ai = { tune, path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3) * tune.skill, guard: null, home: null, wp: null, wt: 0, nav: null, breach: null, breachT: 0, mv: null, did: 0, dn: 0, gt: 0 };
   if (b.team === 'T') {
     const site = Math.random() < .75 ? H.plan : (H.plan === 'A' ? 'B' : 'A');
     const routes = ROUTES[site], route = routes[Math.random() * routes.length | 0];
@@ -262,7 +269,7 @@ function trace(sh, ox, oy, oz, dx, dy, dz, range) {
 function botFire(b, tgt, dist) {
   const wid = b.prim || b.sec, w = W[wid], a = b.ai;
   const ox = b.x, oy = b.y + 1.55, oz = b.z;
-  let dx = tgt.x - ox, dy = tgt.y + (Math.random() < .14 ? 1.62 : 1.15) - oy, dz = tgt.z - oz;
+  let dx = tgt.x - ox, dy = tgt.y + (Math.random() < a.tune.hs ? 1.62 : 1.15) - oy, dz = tgt.z - oz;
   const L = Math.hypot(dx, dy, dz); dx /= L; dy /= L; dz /= L;
   const fm = b.fort && wid === b.prim ? GADGETS.fortify : null;                 // Fortify Mode: tighter, faster rifle
   const err = (w.spread * .8 + .004 + dist * .0007) / a.skill * (fm ? fm.spreadMul : 1);
@@ -276,7 +283,7 @@ function botFire(b, tgt, dist) {
   }
   bcast({ t: 'shot', id: b.id, w: wid, x: ox, y: oy, z: oz, tx: end[0], ty: end[1], tz: end[2] });
   for (const g of agg.values()) applyDamage(g.v, b, wid, g.n, g.hs);
-  a.cd = (w.delay * (w.auto ? 1 : 1.5) + rnd(0, .12)) * (fm ? fm.rateMul : 1);
+  a.cd = (w.delay * (w.auto ? 1 : 1.5) + rnd(0, .12)) * (fm ? fm.rateMul : 1) * a.tune.cd;
   if (--a.burst <= 0) { a.cd += rnd(.4, .9); a.burst = 3 + (Math.random() * 5 | 0); }
 }
 // A barricaded doorway in front of a bot that is trying to walk (index into DOORS, or -1).
@@ -403,6 +410,7 @@ export function init(o = {}) {
   H.size = o.size || 5; H.botsOn = o.bots !== false; H.headless = !!o.headless;
   H.log = []; H.whp = new Map(); resetWorld(); gad.resetRound();
   H.sq1 = 'T'; H.sc = [0, 0];
+  H.level = o.level ?? .4; H.levelFn = o.levelFn || null;   // bot difficulty: fixed level, or a function re-read every round
   G.players.clear(); G.isHost = true;
   if (!H.headless) { mk('h', (o.name || 'Player').slice(0, 16), o.team || 'CT', false); G.myId = 'h'; }
   fillBots(); startMatch();
