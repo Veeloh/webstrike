@@ -1,15 +1,18 @@
 // Authoritative game simulation: rounds, operators, bomb, damage, walls, bots.
 // Runs inside the host's browser (solo / P2P host) or inside the Node dedicated server.
-// Internal team ids: 'T' = Attack, 'CT' = Defense.
+// Internal team ids: 'T' = Attack, 'CT' = Defense. A team id is the *side* a player is on right now.
+// Players also belong to a squad (p.sq = 0 or 1) that stays together and swaps sides every SWAP_EVERY rounds.
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld } from './data.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, smokeCut, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld } from './data.js';
+import { createGadgets } from './gadgets.js';
 
-export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8;
+export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8, SWAP_EVERY = 3;
+export const SQ_NAMES = ['Alpha', 'Bravo'];   // first to MAXR round wins; a 7-7 tie is settled by one deciding round
 const DEFUSE = 7;                          // seconds to defuse (no defuse kits any more)
 const WALL_HP = 240, BAR_HP = 120;   // wall damage needed to carve a hole / break a barricade
 export const MAX_BARR = 6;           // barricades defenders may place per round
 export const H = {
-  phase: 'freeze', t: FREEZE, round: 1, sT: 0, sCT: 0, sid: 0, over: false,
+  phase: 'freeze', t: FREEZE, round: 1, sc: [0, 0], sq1: 'T', sid: 0, over: false,   // sc = squad scores, sq1 = the side squad 0 is on
   bomb: { s: 'none', x: 0, z: 0, t: 0 }, holds: {}, botsOn: true, size: 5, nextBot: 1, headless: false,
   plan: 'A', acc: { rs: 0, snap: 0, meta: 0 },
   log: [], whp: new Map(),                 // world events this round (replayed to late joiners), wall hit points left
@@ -17,11 +20,26 @@ export const H = {
 
 const list = () => [...G.players.values()];
 const rnd = (a, b) => a + Math.random() * (b - a);
+const sqOn = side => (H.sq1 === side ? 0 : 1);                       // which squad is on a side right now
+const sideOf = sq => (sq === 0 ? H.sq1 : H.sq1 === 'T' ? 'CT' : 'T'); // which side a squad is on right now
+const scoreOn = side => H.sc[sqOn(side)];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; };
 const turn = (cur, tgt, max) => cur + clamp(angDiff(tgt, cur), -max, max);
 const BOT_NAMES = ['Rex', 'Nova', 'Kilo', 'Echo', 'Zed', 'Ivy', 'Moe', 'Sable', 'Tank', 'Fox', 'Jax', 'Lux', 'Onyx', 'Vee', 'Dash'];
 const SIDE = { T: 'Attackers', CT: 'Defenders' };
+// Private message to one player (nothing for bots). The host's own player is delivered locally.
+function tell(p, text, extra) {
+  if (!p || p.isBot) return;
+  const m = { t: 'msg', text, short: 1, ...extra };
+  if (p.id === G.myId) { if (G.handle) G.handle(m); } else if (G.net) G.net.sendTo(p.id, m);
+}
+// Is attacker `a` standing behind victim `v` (relative to where v is facing)?
+function behind(v, a) {
+  const dx = a.x - v.x, dz = a.z - v.z, d = Math.hypot(dx, dz) || 1;
+  return (-Math.sin(v.yaw) * dx - Math.cos(v.yaw) * dz) / d < -.35;
+}
+const gad = createGadgets({ H, list, bcast, worldEvent, inflict, tell });
 
 function bcast(m, except) {
   if (G.net) G.net.broadcast(m, except);
@@ -32,12 +50,13 @@ function bcast(m, except) {
 function equip(p, id) {
   let o = OPS[id];
   if (!o || o.side !== p.team) { id = OPS_BY_SIDE[p.team][0]; o = OPS[id]; }
-  p.op = id; p.prim = o.prim; p.sec = o.sec; p.armor = o.armor; p.w = o.prim;
+  p.op = id; p.prim = o.prim; p.sec = o.sec; p.armor = o.armor; p.w = o.prim; p.gad = o.gad;
+  gad.resetPlayer(p);
 }
 function mk(id, name, team, isBot) {
   team = team === 'T' ? 'T' : 'CT';
   const p = {
-    id, name, team, isBot, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, hp: 100, armor: 0, alive: false,
+    id, name, team, isBot, sq: sqOn(team), lean: 0, x: 0, y: 0, z: 0, yaw: 0, pitch: 0, hp: 100, armor: 0, alive: false,
     k: 0, d: 0, op: null, prim: null, sec: 'pistol', w: 'pistol', crouch: 0, ai: null,
   };
   equip(p, null);
@@ -61,16 +80,16 @@ function fillBots() {
 
 // ---------- broadcast helpers ----------
 function sendMeta() {
-  bcast({ t: 'meta', p: list().map(p => ({ id: p.id, name: p.name, team: p.team, hp: p.hp, armor: p.armor | 0, alive: p.alive, k: p.k, d: p.d, bot: p.isBot, op: p.op, prim: p.prim, sec: p.sec })) });
+  bcast({ t: 'meta', p: list().map(p => ({ id: p.id, name: p.name, team: p.team, hp: p.hp, armor: p.armor | 0, alive: p.alive, k: p.k, d: p.d, bot: p.isBot, op: p.op, prim: p.prim, sec: p.sec, sq: p.sq })) });
 }
 function sendRS() {
   const hid = Object.keys(H.holds)[0], h = hid ? H.holds[hid] : null;
   let hold = null;
   if (h) hold = { id: hid, type: h.type, p: h.p, need: h.type === 'plant' ? PLANT : DEFUSE };
-  bcast({ t: 'rs', phase: H.phase, tm: Math.max(0, H.t), round: H.round, sT: H.sT, sCT: H.sCT, over: H.over, bomb: { s: H.bomb.s, x: H.bomb.x, z: H.bomb.z, t: Math.max(0, H.bomb.t) }, hold });
+  bcast({ t: 'rs', phase: H.phase, tm: Math.max(0, H.t), round: H.round, sT: scoreOn('T'), sCT: scoreOn('CT'), sc: H.sc, sq1: H.sq1, over: H.over, bomb: { s: H.bomb.s, x: H.bomb.x, z: H.bomb.z, t: Math.max(0, H.bomb.t) }, hold });
 }
 function sendSnap() {
-  bcast({ t: 'snap', e: list().map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(3), +p.pitch.toFixed(3), p.w, p.crouch ? 1 : 0]) });
+  bcast({ t: 'snap', e: list().map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(3), +p.pitch.toFixed(3), p.w, p.crouch ? 1 : 0, +(p.lean || 0).toFixed(2)]) });
 }
 
 // ---------- world (breakable walls / barricades) ----------
@@ -83,12 +102,13 @@ function worldEvent(ev) {
 function damageWall(i, dmg, x, y, z) {
   const b = BOXES[i];
   if (!b || b.off || b.rf) return;
-  const isBar = b.bar !== undefined;
-  if (!isBar && !b.brk) return;
-  const hp = (H.whp.get(i) ?? (isBar ? BAR_HP : WALL_HP)) - dmg;
+  const isBar = b.bar !== undefined, isSh = b.sh !== undefined;
+  if (!isBar && !isSh && !b.brk) return;
+  const hp = (H.whp.get(i) ?? (isBar ? BAR_HP : isSh ? GADGETS.shield.hp : WALL_HP)) - dmg;
   if (hp > 0) { H.whp.set(i, hp); return; }
   H.whp.delete(i);
   if (isBar) worldEvent({ k: 'barr', d: b.bar, on: false });
+  else if (isSh) worldEvent({ k: 'shieldoff', u: b.sh });
   else worldEvent({ k: 'hole', i, x: +x.toFixed(2), z: +z.toFixed(2) });
 }
 
@@ -100,7 +120,10 @@ function spawnOne(p, i) {
   if (p.isBot) botInit(p);
 }
 function startRound() {
-  H.phase = 'freeze'; H.t = FREEZE; H.bomb = { s: 'none', x: 0, z: 0, t: 0 }; H.holds = {}; H.sid++;
+  // Every SWAP_EVERY rounds the squads trade sides. Everybody's operator resets to one of the new side (they pick again in prep).
+  const swap = H.round > 1 && (H.round - 1) % SWAP_EVERY === 0;
+  if (swap) { H.sq1 = H.sq1 === 'T' ? 'CT' : 'T'; for (const p of list()) { p.team = sideOf(p.sq); p.op = null; } }
+  H.phase = 'freeze'; H.t = FREEZE; H.bomb = { s: 'none', x: 0, z: 0, t: 0 }; H.holds = {}; H.sid++; gad.resetRound();
   H.plan = Math.random() < .5 ? 'A' : 'B';
   H.log = []; H.whp = new Map(); resetWorld();   // walls whole, barricades off
   const idx = { T: 0, CT: 0 };
@@ -110,21 +133,24 @@ function startRound() {
     spawnOne(p, idx[p.team]++);
   }
   bcast({ t: 'world', ev: [{ k: 'reset' }] });
-  bcast({ t: 'spawn', sid: H.sid, l: list().map(p => [p.id, p.x, p.z, p.yaw]) });
-  bcast({ t: 'msg', text: `Round ${H.round} — prep phase (B: operator)`, short: 1 });
-  sendMeta(); sendRS();
+  sendMeta();                                  // before 'spawn' so clients already know their new side and loadout
+  bcast({ t: 'spawn', sid: H.sid, swap: swap ? 1 : 0, l: list().map(p => [p.id, p.x, p.z, p.yaw]) });
+  const final = H.sc[0] === MAXR - 1 && H.sc[1] === MAXR - 1;
+  bcast({ t: 'msg', text: swap ? 'SIDES SWAP' : final ? 'FINAL ROUND — prep phase (B: operator)' : `Round ${H.round} — prep phase (B: operator)`, short: swap ? 0 : 1, swap: swap ? 1 : 0 });
+  sendRS(); gad.sendGS();
 }
 function startMatch() {
-  H.round = 1; H.sT = 0; H.sCT = 0; H.over = false;
+  H.round = 1; H.sc = [0, 0]; H.over = false;
+  if (H.sq1 !== 'T') { H.sq1 = 'T'; for (const p of list()) { p.team = sideOf(p.sq); p.op = null; } }   // a new match starts on the original sides
   for (const p of list()) { p.k = 0; p.d = 0; p.alive = false; }
   startRound();
 }
 function endRound(winner, reason) {
   if (H.phase !== 'live') return;
   H.phase = 'end'; H.t = ENDT; H.holds = {};
-  if (winner === 'T') H.sT++; else H.sCT++;
-  const name = SIDE[winner];
-  if (H.sT >= MAXR || H.sCT >= MAXR) { H.over = true; H.t = 9; bcast({ t: 'msg', text: `MATCH OVER — ${name} win ${H.sT}:${H.sCT}`, team: winner }); }
+  const wsq = sqOn(winner); H.sc[wsq]++;
+  const name = `${SQ_NAMES[wsq]} (${SIDE[winner]})`;
+  if (H.sc[wsq] >= MAXR) { H.over = true; H.t = 9; bcast({ t: 'msg', text: `MATCH OVER — ${SQ_NAMES[wsq]} win ${H.sc[wsq]}:${H.sc[1 - wsq]}`, team: winner }); }
   else bcast({ t: 'msg', text: `${name} win — ${reason}`, team: winner });
   sendMeta(); sendRS();
 }
@@ -146,11 +172,22 @@ function applyDamage(v, a, wid, n, hs) {
   if (!v.alive || H.phase === 'freeze') return;
   const w = W[wid]; if (!w) return;
   let dmg = w.dmg * (n - hs) + w.dmg * HS_MULT * hs;
-  if (w.melee) dmg = w.dmg * n;
-  if (v.armor > 0) { v.armor = Math.max(0, v.armor - dmg * .3); dmg *= .55; }
+  if (w.melee) {
+    dmg = w.dmg * n;
+    if (a && a.gad === 'ghost' && behind(v, a)) { dmg *= GADGETS.ghost.stab; tell(a, 'BACKSTAB'); }   // Phantom's knife from behind
+  }
+  inflict(v, a, dmg, wid, hs);
+}
+// Everything that happens to a hit: armour, gadget modifiers, health, kills. o.pierce = ignores armour (Trip Mine).
+function inflict(v, a, dmg, wid, hs = 0, o = {}) {
+  if (!v.alive || H.phase === 'freeze') return;
+  if (v.armor > 0 && !o.pierce) { v.armor = Math.max(0, v.armor - dmg * .3); dmg *= .55; }
+  if (v.fort) dmg *= GADGETS.fortify.dmgMul;                                         // Fortify Mode
+  if (v.gact > 0 && a && behind(v, a)) dmg *= GADGETS.rush.backMul;                  // Adrenaline Rush: less damage from behind
+  if (v.ghost) gad.cancelGhost(v);                                                   // taking damage ends Ghost Walk
   v.hp -= Math.round(dmg);
   if (v.hp <= 0) {
-    v.hp = 0; v.alive = false; v.d++; delete H.holds[v.id];
+    v.hp = 0; v.alive = false; v.d++; delete H.holds[v.id]; v.ghost = false; v.fort = false;
     if (a && a.id !== v.id) a.k++;
     bcast({ t: 'kill', kn: a ? a.name : '', kt: a ? a.team : '', vn: v.name, vt: v.team, w: wid, h: hs > 0 ? 1 : 0 });
     sendMeta(); checkEnd();
@@ -168,6 +205,8 @@ function startHold(p, type) {
     if (p.team !== 'CT' || H.bomb.s !== 'planted' || Math.hypot(p.x - H.bomb.x, p.z - H.bomb.z) > 2.2) return false;
     if (Object.values(H.holds).some(h => h.type === 'defuse')) return false;
   }
+  if (p.fort) return false;                       // Fortify Mode locks you in place
+  gad.cancelGhost(p);                             // planting / defusing ends Ghost Walk
   H.holds[p.id] = { type, p: 0, seen: Date.now() };
   return true;
 }
@@ -191,7 +230,7 @@ function holdsTick(dt) {
 
 // ---------- bots ----------
 function botInit(b) {
-  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null, breach: null, breachT: 0 };
+  const a = b.ai = { path: [], pi: 0, tgt: null, react: 0, cd: 0, burst: 4, lost: 9, strafe: 0, sd: 1, lx: b.x, lz: b.z, st: 0, unst: 0, ua: 0, skill: rnd(.8, 1.3), guard: null, home: null, wp: null, wt: 0, nav: null, breach: null, breachT: 0, mv: null, did: 0, dn: 0, gt: 0 };
   if (b.team === 'T') {
     const site = Math.random() < .75 ? H.plan : (H.plan === 'A' ? 'B' : 'A');
     const routes = ROUTES[site], route = routes[Math.random() * routes.length | 0];
@@ -225,7 +264,8 @@ function botFire(b, tgt, dist) {
   const ox = b.x, oy = b.y + 1.55, oz = b.z;
   let dx = tgt.x - ox, dy = tgt.y + (Math.random() < .14 ? 1.62 : 1.15) - oy, dz = tgt.z - oz;
   const L = Math.hypot(dx, dy, dz); dx /= L; dy /= L; dz /= L;
-  const err = (w.spread * .8 + .004 + dist * .0007) / a.skill;
+  const fm = b.fort && wid === b.prim ? GADGETS.fortify : null;                 // Fortify Mode: tighter, faster rifle
+  const err = (w.spread * .8 + .004 + dist * .0007) / a.skill * (fm ? fm.spreadMul : 1);
   const agg = new Map(); let end = null;
   for (let i = 0; i < (w.pellets || 1); i++) {
     let ex = dx + (Math.random() - .5) * 2 * err, ey = dy + (Math.random() - .5) * 2 * err, ez = dz + (Math.random() - .5) * 2 * err;
@@ -236,7 +276,7 @@ function botFire(b, tgt, dist) {
   }
   bcast({ t: 'shot', id: b.id, w: wid, x: ox, y: oy, z: oz, tx: end[0], ty: end[1], tz: end[2] });
   for (const g of agg.values()) applyDamage(g.v, b, wid, g.n, g.hs);
-  a.cd = w.delay * (w.auto ? 1 : 1.5) + rnd(0, .12);
+  a.cd = (w.delay * (w.auto ? 1 : 1.5) + rnd(0, .12)) * (fm ? fm.rateMul : 1);
   if (--a.burst <= 0) { a.cd += rnd(.4, .9); a.burst = 3 + (Math.random() * 5 | 0); }
 }
 // A barricaded doorway in front of a bot that is trying to walk (index into DOORS, or -1).
@@ -274,11 +314,15 @@ function botThink(b, dt) {
     if (d > 55 * SCALE || d >= bd) continue;
     const dot = (dx * -Math.sin(b.yaw) + dz * -Math.cos(b.yaw)) / (d || 1);
     if (d > 9 * SCALE && dot < .3 && a.tgt !== e.id) continue;
-    if (!losClear(b.x, eyeY, b.z, e.x, e.y + 1.25, e.z)) continue;
+    if (!losClear(b.x, eyeY, b.z, e.x, e.y + 1.25, e.z) || smokeCut(b.x, b.z, e.x, e.z)) continue;
+    if (e.ghost && d > 10 * SCALE) continue;      // a ghost walking silently is only noticed up close
     tgt = e; bd = d;
   }
   if (tgt) { if (a.tgt !== tgt.id) { a.tgt = tgt.id; a.react = (.25 + Math.random() * .3) / a.skill; } a.lost = 0; }
   else { a.lost += dt; if (a.lost > 1.2) a.tgt = null; }
+
+  // Gadget rules (one per operator, see gadgets.js). The point a defender watches from its hold spot depends on which hold it has.
+  gad.bot(b, dt, { tgt, bd: tgt ? bd : 0, atEnd: a.pi >= a.path.length, thr: b.x < -8 * SCALE ? [-22 * SCALE, -8 * SCALE] : b.x > 8 * SCALE ? [20 * SCALE, 6 * SCALE] : [0, 8 * SCALE] });
 
   let mvx = 0, mvz = 0, want = false, speed = 4.3, gx = null, gz = null;
   const holding = H.holds[b.id];
@@ -288,7 +332,7 @@ function botThink(b, dt) {
     const ty = Math.atan2(-dx, -dz), tp = Math.atan2(dy, Math.hypot(dx, dz));
     b.yaw = turn(b.yaw, ty, 8 * dt * a.skill);
     b.pitch += clamp(tp - b.pitch, -6 * dt, 6 * dt);
-    if (H.phase === 'live' && Math.abs(angDiff(ty, b.yaw)) < .1 && a.react <= 0 && a.cd <= 0) botFire(b, tgt, bd);
+    if (H.phase === 'live' && !b.ghost && Math.abs(angDiff(ty, b.yaw)) < .1 && a.react <= 0 && a.cd <= 0) botFire(b, tgt, bd);
     a.strafe -= dt;
     if (a.strafe <= 0) { a.strafe = rnd(.4, 1.3); a.sd = Math.random() < .25 ? 0 : (Math.random() < .5 ? -1 : 1); }
     if (a.sd) { mvx = Math.cos(b.yaw) * a.sd; mvz = -Math.sin(b.yaw) * a.sd; want = true; speed = 2.6; }
@@ -337,6 +381,7 @@ function botThink(b, dt) {
       if (d > .4) { mvx = dx / d; mvz = dz / d; want = true; b.yaw = turn(b.yaw, Math.atan2(-dx, -dz), 6 * dt); b.pitch *= .9; }
     }
   }
+  if (b.fort) want = false;                       // a deployed Bastion does not move
   a.st += dt;
   if (a.st > .7) {
     if (want && !tgt && Math.hypot(b.x - a.lx, b.z - a.lz) < .25) {
@@ -346,15 +391,18 @@ function botThink(b, dt) {
     }
     a.lx = b.x; a.lz = b.z; a.st = 0;
   }
+  a.mv = want ? [mvx, mvz] : null;
   if (a.unst > 0) { a.unst -= dt; const c = Math.cos(a.ua), s = Math.sin(a.ua); const nx = mvx * c - mvz * s, nz = mvx * s + mvz * c; mvx = nx; mvz = nz; want = true; }
+  speed *= (b.slow > 0 ? GADGETS.mine.slowMul : 1) * (b.gact > 0 ? GADGETS.rush.speedMul : 1) * (b.ghost ? 1.1 : 1);
   if (want && !H.holds[b.id] && H.phase === 'live') moveE(b, mvx * speed * dt, 0, mvz * speed * dt, 1.75);
-  b.w = b.prim || b.sec;
+  b.w = b.ghost ? 'knife' : (b.prim || b.sec);
 }
 
 // ---------- API ----------
 export function init(o = {}) {
   H.size = o.size || 5; H.botsOn = o.bots !== false; H.headless = !!o.headless;
-  H.log = []; H.whp = new Map(); resetWorld();
+  H.log = []; H.whp = new Map(); resetWorld(); gad.resetRound();
+  H.sq1 = 'T'; H.sc = [0, 0];
   G.players.clear(); G.isHost = true;
   if (!H.headless) { mk('h', (o.name || 'Player').slice(0, 16), o.team || 'CT', false); G.myId = 'h'; }
   fillBots(); startMatch();
@@ -392,15 +440,17 @@ export function onMsg(from, m) {
     case 'st': {
       if (!p || !p.alive) return;
       if (![m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) return;
-      p.yaw = m.yaw; p.pitch = clamp(m.pitch, -1.6, 1.6); p.crouch = m.c ? 1 : 0;
+      p.yaw = m.yaw; p.pitch = clamp(m.pitch, -1.6, 1.6); p.crouch = m.c ? 1 : 0; p.lean = clamp(+m.l || 0, -1, 1);
       if (typeof m.w === 'string' && W[m.w]) p.w = m.w;
       // Attackers are held in their spawn during prep; defenders can move (to place barricades).
-      if (m.s === H.sid && (H.phase !== 'freeze' || p.team === 'CT')) { p.x = clamp(m.x, -30 * SCALE, 30 * SCALE); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30 * SCALE, 30 * SCALE); }
+      if (!p.fort && m.s === H.sid && (H.phase !== 'freeze' || p.team === 'CT')) {   // a deployed Bastion stays where he is
+        p.x = clamp(m.x, -30 * SCALE, 30 * SCALE); p.y = clamp(m.y, 0, 10); p.z = clamp(m.z, -30 * SCALE, 30 * SCALE); }
       break;
     }
     case 'fire': {
       if (!p || !p.alive || H.phase === 'freeze' || !W[m.w]) return;
       if (![m.x, m.y, m.z, m.tx, m.ty, m.tz].every(Number.isFinite)) return;
+      if (p.ghost && m.w !== 'knife') gad.cancelGhost(p);   // shooting ends Ghost Walk
       bcast({ t: 'shot', id: from, w: m.w, x: m.x, y: m.y, z: m.z, tx: m.tx, ty: m.ty, tz: m.tz }, from);
       break;
     }
@@ -410,13 +460,14 @@ export function onMsg(from, m) {
       const w = W[m.w];
       if (m.w !== 'knife' && m.w !== p.prim && m.w !== p.sec) return;
       const n = clamp(m.n | 0, 1, w.pellets), hs = clamp(m.hs | 0, 0, n);
+      if (p.ghost && m.w !== 'knife') gad.cancelGhost(p);
       applyDamage(v, p, m.w, n, hs);
       break;
     }
     case 'wall': {   // the shooter's client says its bullets hit wall/barricade box m.i at (m.x, m.y, m.z)
       const b = BOXES[m.i];
       if (!p || !p.alive || H.phase === 'freeze' || !b || b.off || !W[m.w]) return;
-      if (!(b.brk || b.bar !== undefined)) return;
+      if (!(b.brk || b.bar !== undefined || b.sh !== undefined)) return;
       if (m.w !== 'knife' && m.w !== p.prim && m.w !== p.sec) return;
       if (![m.x, m.y, m.z].every(Number.isFinite)) return;
       const w = W[m.w], n = clamp(m.n | 0, 1, w.pellets);
@@ -442,6 +493,7 @@ export function onMsg(from, m) {
       } else worldEvent({ k: 'barr', d: m.d | 0, on: false });
       break;
     }
+    case 'gad': gad.msg(p, m); break;    // gadget key pressed / released
     case 'use': {
       if (!p) return;
       if (m.on) { if (startHold(p, p.team === 'T' ? 'plant' : 'defuse') && H.holds[from]) H.holds[from].seen = Date.now(); }
@@ -464,9 +516,10 @@ export function tick(dt) {
   } else if (H.phase === 'end') {
     if (H.t <= 0) { if (H.over) startMatch(); else { H.round++; startRound(); } }
   }
+  gad.tick(dt);
   const a = H.acc; a.rs += dt; a.snap += dt; a.meta += dt;
   if (a.rs > .25) { a.rs = 0; sendRS(); }
   if (a.snap > .05) { a.snap = 0; sendSnap(); }
   if (a.meta > 1) { a.meta = 0; sendMeta(); }
 }
-export const Host = { init, tick, onMsg, removePlayer, H };
+export const Host = { init, tick, onMsg, removePlayer, H, gad };
