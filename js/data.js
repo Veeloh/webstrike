@@ -31,24 +31,47 @@ for (const k in W) if (!W[k].melee) { W[k].range *= SCALE; W[k].spread /= SCALE;
 
 // ---------------------------------------------------------------------------
 // OPERATORS. Internal team ids stay 'T' (= Attack) and 'CT' (= Defense).
-// Each operator is a fixed loadout: one primary, one secondary, an armour amount. No abilities yet.
+// Each operator is a fixed loadout (one primary, one secondary, an armour amount) plus one gadget (see GADGETS).
 // ---------------------------------------------------------------------------
 export const OPS = {
-  vanguard: { name: 'Vanguard', side: 'T',  prim: 'rifle',   sec: 'pistol',   armor: 60 },
-  breacher: { name: 'Breacher', side: 'T',  prim: 'shotgun', sec: 'deagle',   armor: 100 },
-  phantom:  { name: 'Phantom',  side: 'T',  prim: 'carbine', sec: 'pistol',   armor: 30 },
-  striker:  { name: 'Striker',  side: 'T',  prim: 'smg',     sec: 'mpistol',  armor: 60 },
-  marksman: { name: 'Marksman', side: 'T',  prim: 'dmr',     sec: 'revolver', armor: 30 },
-  warden:   { name: 'Warden',   side: 'CT', prim: 'lmg',     sec: 'pistol',   armor: 100 },
-  anchor:   { name: 'Anchor',   side: 'CT', prim: 'autosg',  sec: 'revolver', armor: 100 },
-  hawk:     { name: 'Hawk',     side: 'CT', prim: 'awp',     sec: 'deagle',   armor: 30 },
-  rook:     { name: 'Rook',     side: 'CT', prim: 'pdw',     sec: 'mpistol',  armor: 60 },
-  bastion:  { name: 'Bastion',  side: 'CT', prim: 'br',      sec: 'pistol',   armor: 60 },
+  vanguard: { name: 'Vanguard', side: 'T',  prim: 'rifle',   sec: 'pistol',   armor: 60, gad: 'smoke' },
+  breacher: { name: 'Breacher', side: 'T',  prim: 'shotgun', sec: 'deagle',   armor: 100, gad: 'breach' },
+  phantom:  { name: 'Phantom',  side: 'T',  prim: 'carbine', sec: 'pistol',   armor: 30, gad: 'ghost' },
+  striker:  { name: 'Striker',  side: 'T',  prim: 'smg',     sec: 'mpistol',  armor: 60, gad: 'rush' },
+  marksman: { name: 'Marksman', side: 'T',  prim: 'dmr',     sec: 'revolver', armor: 30, gad: 'recon' },
+  warden:   { name: 'Warden',   side: 'CT', prim: 'lmg',     sec: 'pistol',   armor: 100, gad: 'shield' },
+  anchor:   { name: 'Anchor',   side: 'CT', prim: 'autosg',  sec: 'revolver', armor: 100, gad: 'reinforce' },
+  hawk:     { name: 'Hawk',     side: 'CT', prim: 'awp',     sec: 'deagle',   armor: 30, gad: 'beacon' },
+  rook:     { name: 'Rook',     side: 'CT', prim: 'pdw',     sec: 'mpistol',  armor: 60, gad: 'mine' },
+  bastion:  { name: 'Bastion',  side: 'CT', prim: 'br',      sec: 'pistol',   armor: 60, gad: 'fortify' },
 };
 export const OPS_BY_SIDE = {
   T: Object.keys(OPS).filter(k => OPS[k].side === 'T'),
   CT: Object.keys(OPS).filter(k => OPS[k].side === 'CT'),
 };
+
+// ---------------------------------------------------------------------------
+// GADGETS. One per operator, used with G / Mouse 5. All tuning lives here.
+//   charges : uses per round        cd : seconds before the next use
+//   bar/regen/min : Ghost Walk's rechargeable bar (seconds of use, recharge per second, minimum to start)
+//   dur : how long an effect lasts  r : radius (world units)
+// ---------------------------------------------------------------------------
+export const GADGETS = {
+  smoke:     { name: 'Smoke Canister',    desc: 'Throw a canister that blocks sightlines for a few seconds.', charges: 2, cd: 1.5, dur: 8, r: 4.6, throwD: 22 },
+  breach:    { name: 'Breach Charge',     desc: 'Instantly carves a hole in a breakable wall (not reinforced).', charges: 2, cd: 1.2, range: 5 },
+  ghost:     { name: 'Ghost Walk',        desc: 'Hold to move silently with your knife out. Shooting, damage or planting cancels it. Backstabs hit hard.', bar: 6, regen: .75, min: 1, hold: true, stab: 3 },
+  rush:      { name: 'Adrenaline Rush',   desc: 'Short burst of faster movement and reloading, plus reduced damage from behind.', cd: 22, dur: 4.5, speedMul: 1.35, reloadMul: .5, backMul: .5 },
+  recon:     { name: 'Recon Drone',       desc: 'Scouts a room briefly and marks enemies on the minimap.', charges: 2, cd: 2, dur: 6, r: 16, throwD: 28 },
+  shield:    { name: 'Deployable Shield', desc: 'A bullet-blocking panel that can be shot down.', charges: 2, cd: 1.5, hp: 220 },
+  reinforce: { name: 'Reinforcer',        desc: 'Makes one breakable wall unbreakable for the round.', charges: 2, cd: 1, range: 6 },
+  beacon:    { name: 'Spotter Beacon',    desc: 'Reveals any enemy who crosses it.', charges: 2, cd: 1, r: 2.8, mark: 5, throwD: 9 },
+  mine:      { name: 'Trip Mine',         desc: 'Damages and slows the first attacker who steps on it.', charges: 3, cd: 1, r: 1.3, dmg: 35, slow: 3.5, slowMul: .5, throwD: 5 },
+  fortify:   { name: 'Fortify Mode',      desc: 'Deploys a tripod and locks you in place: less damage, tighter and faster rifle. Loud to deploy.', cd: 2, toggle: true, dmgMul: .6, spreadMul: .35, rateMul: .65 },
+};
+// Gadgets a defender may use during the prep phase (placed things). Everything works in the live round.
+export const PREP_GADGETS = new Set(['shield', 'reinforce', 'beacon', 'mine', 'fortify']);
+// Leaning: sideways offset (world units) of the head at full lean. The hitbox moves with it.
+export const LEAN_D = 0.6;
 
 // ---------------------------------------------------------------------------
 // MAP: "Roofline"
@@ -65,7 +88,7 @@ export const OPS_BY_SIDE = {
 // they block movement but not bullets or line of sight (see castWorld).
 //
 // Box flags:
-//   c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays), 4 = barricade
+//   c: 0 = wall, 1 = crate, 2 = window glass (collides, does not block rays), 4 = barricade, 5 = deployable shield (sh = uid)
 //   brk: breakable wall segment (shoot/knife it enough and a hole is carved, see carve())
 //   rf:  reinforced wall (cannot be broken; drawn in a different colour)
 //   bar: barricade, value = index into DOORS. Barricades start switched off.
@@ -232,16 +255,46 @@ export function carve(i, px, pz) {
   add(h1, hi, b.y0, b.y1, true);       // right piece
   add(h0, h1, HOLE_H, b.y1, false);    // lintel over the hole
 }
-// Back to the start-of-round map: all walls whole, no barricades.
+// ---- gadget world state. Smokes only matter to the host (bot sight); shields are real boxes so everybody collides with them.
+export const SMOKES = [];                 // { x, z, r }
+export const SHIELDS = new Map();         // shield uid -> index into BOXES
+const SH_W = 3.4, SH_T = 0.35, SH_H = 2.3;
+function addShield(u, x, z, alongX) {
+  if (SHIELDS.has(u)) return;             // applyWorld may run twice on a browser host: stay idempotent
+  const hw = (alongX ? SH_W : SH_T) / 2, hd = (alongX ? SH_T : SH_W) / 2;
+  const b = wbox(x - hw, 0, z - hd, x + hw, SH_H, z + hd, 5);
+  b.sh = u;
+  SHIELDS.set(u, BOXES.length); BOXES.push(b);
+}
+// Shield footprint for a centre and orientation (used to test whether there is room before placing).
+export function shieldRect(x, z, alongX) {
+  const hw = (alongX ? SH_W : SH_T) / 2, hd = (alongX ? SH_T : SH_W) / 2;
+  return { x0: x - hw, x1: x + hw, z0: z - hd, z1: z + hd };
+}
+// Does the segment (x1,z1)-(x2,z2) pass through a smoke cloud? (Bot sight check.)
+export function smokeCut(x1, z1, x2, z2) {
+  if (!SMOKES.length) return false;
+  const dx = x2 - x1, dz = z2 - z1, L2 = dx * dx + dz * dz;
+  for (const s of SMOKES) {
+    let t = L2 ? ((s.x - x1) * dx + (s.z - z1) * dz) / L2 : 0; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    if (Math.hypot(x1 + dx * t - s.x, z1 + dz * t - s.z) < s.r) return true;
+  }
+  return false;
+}
+// Back to the start-of-round map: all walls whole, no barricades, no shields, no reinforcements.
 export function resetWorld() {
   BOXES.length = BASE;
-  for (const b of BOXES) b.off = b.bar !== undefined;
+  for (const b of BOXES) { b.off = b.bar !== undefined; if (b.rfx) { b.rf = false; b.rfx = false; } }
+  SHIELDS.clear(); SMOKES.length = 0;
 }
 export function applyWorld(ev) {
   if (!ev) return;
   if (ev.k === 'reset') resetWorld();
   else if (ev.k === 'hole') { if (Number.isFinite(+ev.x) && Number.isFinite(+ev.z)) carve(ev.i | 0, +ev.x, +ev.z); }
   else if (ev.k === 'barr') { const d = DOORS[ev.d | 0]; if (d) BOXES[d.bi].off = !ev.on; }
+  else if (ev.k === 'shield') { if (Number.isFinite(+ev.x) && Number.isFinite(+ev.z)) addShield(ev.u | 0, +ev.x, +ev.z, !!ev.ax); }
+  else if (ev.k === 'shieldoff') { const i = SHIELDS.get(ev.u | 0); if (i !== undefined) BOXES[i].off = true; }
+  else if (ev.k === 'rf') { const b = BOXES[ev.i | 0]; if (b && b.brk && !b.rf) { b.rf = true; b.rfx = true; } }   // Reinforcer
 }
 
 const pt = (x, z) => [x * SCALE, z * SCALE];
@@ -388,10 +441,17 @@ export function castWorldBox(ox, oy, oz, dx, dy, dz, max) {
   if (dy < 0) { const t = -oy / dy; if (t >= 0 && t < best) { best = t; bi = -1; } }
   return { t: best, bi };
 }
+// Sideways offset of the head when leaning (right vector of the player's yaw), see LEAN_D.
+export function leanOff(e) {
+  const l = (e.lean || 0) * LEAN_D;
+  return l ? [Math.cos(e.yaw || 0) * l, -Math.sin(e.yaw || 0) * l] : [0, 0];
+}
 export function rayPlayer(e, ox, oy, oz, dx, dy, dz) {
   const h = e.crouch ? H_CROUCH : H_STAND, hb = h - 0.28;
-  const tb = rayBox(ox, oy, oz, dx, dy, dz, e.x - .32, e.y, e.z - .32, e.x + .32, e.y + hb, e.z + .32);
-  const th = rayBox(ox, oy, oz, dx, dy, dz, e.x - .2, e.y + hb, e.z - .2, e.x + .2, e.y + h, e.z + .2);
+  // Leaning: the head moves the full offset, the torso half of it, the feet stay put. The hitbox follows what other players see.
+  const [lx, lz] = leanOff(e), bx = e.x + lx * .5, bz = e.z + lz * .5, hx = e.x + lx, hz = e.z + lz;
+  const tb = rayBox(ox, oy, oz, dx, dy, dz, bx - .32, e.y, bz - .32, bx + .32, e.y + hb, bz + .32);
+  const th = rayBox(ox, oy, oz, dx, dy, dz, hx - .2, e.y + hb, hz - .2, hx + .2, e.y + h, hz + .2);
   if (th === Infinity && tb === Infinity) return null;
   return th <= tb ? { t: th, head: true } : { t: tb, head: false };
 }
