@@ -43,5 +43,21 @@ export const sfx = {
   crumble(v = 1) { if (v <= 0.02) return; noise(0.55, 1600, 120, 0.9 * v); tone(90, 35, 0.35, 0.5 * v, 'sine'); },   // wall hole / barricade broken
   thud(v = 1) { if (v <= 0.02) return; noise(0.12, 700, 150, 0.6 * v); tone(130, 60, 0.1, 0.4 * v, 'square'); },       // barricade placed
   go() { tone(500, 800, 0.15, 0.3, 'triangle'); },
+  // ---- gadget sounds (v = 0..1 loudness by distance) ----
+  smoke(v = 1) { if (v <= 0.02) return; noise(0.9, 5000, 1200, 0.55 * v, 'highpass'); tone(300, 120, 0.12, 0.25 * v, 'square'); },     // canister pop + hiss
+  breach(v = 1) { if (v <= 0.02) return; noise(0.7, 2800, 90, 1.2 * v); tone(140, 30, 0.6, 1.0 * v, 'sawtooth'); },                     // sharp crack + low thump
+  ghost(on = true) { if (on) tone(900, 220, 0.5, 0.18, 'sine'); else tone(220, 700, 0.3, 0.18, 'sine'); },                              // soft whoosh in / out
+  rush(v = 1) { if (v <= 0.02) return; tone(250, 1100, 0.35, 0.35 * v, 'sawtooth'); setTimeout(() => tone(1100, 1300, 0.12, 0.2 * v, 'square'), 300); },
+  drone(v = 1) { if (v <= 0.02) return; for (let i = 0; i < 5; i++) setTimeout(() => tone(700 + i * 90, 760 + i * 90, 0.05, 0.22 * v, 'square'), i * 55); },   // chirpy launch
+  shield(v = 1) { if (v <= 0.02) return; noise(0.14, 2600, 700, 0.7 * v, 'bandpass'); tone(520, 330, 0.28, 0.4 * v, 'triangle'); },     // metal clang
+  reinforce(v = 1) { if (v <= 0.02) return; for (let i = 0; i < 3; i++) setTimeout(() => { noise(0.08, 3000, 900, 0.6 * v, 'bandpass'); tone(200, 110, 0.07, 0.4 * v, 'square'); }, i * 110); },   // hammering
+  set(v = 1) { if (v <= 0.02) return; noise(0.05, 2500, 1500, 0.35 * v, 'bandpass'); setTimeout(() => tone(1200, 1200, 0.04, 0.25 * v, 'square'), 90); },      // beacon / mine placed: click-click
+  ping(v = 1) { if (v <= 0.02) return; tone(1500, 1500, 0.09, 0.4 * v, 'sine'); setTimeout(() => tone(2000, 2000, 0.16, 0.4 * v, 'sine'), 100); },            // beacon tripped
+  mine(v = 1) { if (v <= 0.02) return; noise(0.5, 3500, 150, 1.0 * v); tone(180, 45, 0.3, 0.8 * v, 'sawtooth'); },
+  fortify(v = 1) { if (v <= 0.02) return; noise(0.22, 1800, 250, 1.1 * v, 'bandpass'); tone(90, 40, 0.3, 0.9 * v, 'square'); setTimeout(() => { noise(0.22, 1500, 200, 1.0 * v, 'bandpass'); tone(70, 35, 0.35, 0.9 * v, 'square'); }, 260); },   // loud ratchet + clunk
+  unfort(v = 1) { if (v <= 0.02) return; noise(0.15, 1500, 400, 0.4 * v, 'bandpass'); },
+  foot(v = 1) { if (v <= 0.02) return; noise(0.07, 700 + Math.random() * 300, 200, 0.5 * v); },                                         // footstep
+  deny() { tone(180, 120, 0.12, 0.3, 'square'); },
+  swap() { tone(440, 440, 0.12, 0.3, 'triangle'); setTimeout(() => tone(660, 660, 0.12, 0.3, 'triangle'), 130); setTimeout(() => tone(880, 880, 0.2, 0.3, 'triangle'), 260); },
   plant() { tone(900, 900, 0.1, 0.3, 'square'); setTimeout(() => tone(700, 700, 0.15, 0.3, 'square'), 120); },
 };
