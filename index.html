@@ -40,9 +40,11 @@
       <summary>Controls &amp; settings</summary>
       <p class="help">
         <b>WASD</b> move · <b>Mouse</b> aim · <b>LMB</b> fire · <b>RMB</b> scope (sniper) · <b>Space</b> jump · <b>Shift</b> walk · <b>C</b> crouch<br>
+        <b>Q / E</b> lean left / right (your hitbox leans too, and other players see it)<br>
         <b>R</b> reload · <b>1/2/3</b> primary/secondary/knife · <b>B</b> operator select (prep phase) · <b>Tab</b> scoreboard<br>
-        <b>F</b> place / remove a barricade on the doorway you face (Defense, prep phase) · shoot or knife walls and barricades to break through<br>
-        <b>Hold E</b> on a bomb site to plant (Attack) or next to the bomb to defuse (Defense)
+        <b>G</b> or <b>Mouse 5</b> use your operator's gadget (hold it for Ghost Walk) · browser back/forward are blocked during a match<br>
+        <b>Hold F</b> on a bomb site to plant (Attack) or next to the bomb to defuse (Defense) · during prep, <b>F</b> places / removes a barricade on the doorway you face (Defense)<br>
+        Shoot or knife walls and barricades to break through. Squads swap sides every 3 rounds; first squad to 8 round wins takes the match.
       </p>
       <label>Sensitivity <input id="sens" type="range" min="0.2" max="3" step="0.05" value="1"></label>
       <label>Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.5"></label>
@@ -51,7 +53,7 @@
 </div>
 
 <div id="hud" class="hidden">
-  <div id="topbar"><span id="scCT">0</span><span id="timer">0:00</span><span id="scT">0</span></div>
+  <div id="topbar"><span id="scCT"><b>0</b><small>DEFENSE</small></span><span id="timer">0:00</span><span id="scT"><b>0</b><small>ATTACK</small></span></div>
   <div id="phase"></div>
   <div id="center"></div>
   <div id="feed"></div>
@@ -62,7 +64,10 @@
   <div id="scope"></div>
   <div id="holdbar" class="hidden"><div id="holdfill"></div><span id="holdtxt"></span></div>
   <div id="bl"><div class="stat"><small>HEALTH</small><b id="hp">100</b></div><div class="stat"><small>ARMOR</small><b id="ar">0</b></div></div>
-  <div id="br"><div id="opname"></div><div id="wname">Pistol</div><div id="ammo">12 / 36</div></div>
+  <div id="br">
+    <div id="gad" class="hidden"><i id="gcd"></i><svg id="gicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg><span id="gkey">G</span><span id="gtxt"></span></div>
+    <div id="wpn"><div id="opname"></div><div id="gname"></div><div id="wname">Pistol</div><div id="ammo">12 / 36</div></div>
+  </div>
   <div id="spec" class="hidden"></div>
   <div id="board" class="hidden"></div>
   <div id="ops" class="hidden"></div>
