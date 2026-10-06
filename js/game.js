@@ -1,7 +1,7 @@
 // WEBSTRIKE client: rendering, input, local player, HUD, menus.
 import * as THREE from 'three';
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, GADGETS, PREP_GADGETS, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, MAPS, MAPINFO, loadMap, moveE, castWorldBox, rayPlayer, inSite, applyWorld, blockedAt, leanOff } from './data.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, PREP_GADGETS, DOORS, BOXES, BUILDINGS, ROOFS, SITES, SCALE, FH, floorOf, MAPS, MAPINFO, loadMap, moveE, castWorldBox, rayPlayer, inSite, applyWorld, blockedAt, leanOff } from './data.js';
 import { Host, MAX_BARR, SQ_NAMES } from './host.js';
 import { Net } from './net.js';
 import { sfx, initAudio, setVolume } from './audio.js';
@@ -22,7 +22,7 @@ scene.fog = new THREE.Fog(0x8fb8e0, 45 * SCALE, 120 * SCALE);
 const cam = new THREE.PerspectiveCamera(75, 1, .05, 250 * SCALE);
 cam.rotation.order = 'YXZ';
 scene.add(cam);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x887766, 1.1));
+const hemi = new THREE.HemisphereLight(0xffffff, 0x887766, 1.1); scene.add(hemi);   // colours / intensities are set per map, see applyTheme()
 const sun = new THREE.DirectionalLight(0xfff2d6, 1.4); sun.position.set(20, 40, 10); scene.add(sun);
 function resize() { renderer.setSize(innerWidth, innerHeight); cam.aspect = innerWidth / innerHeight; cam.updateProjectionMatrix(); }
 addEventListener('resize', resize); resize();
@@ -31,21 +31,40 @@ function mkTex(draw, w = 128, h = 128) {
   const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
-const floorTex = mkTex((x, w, h) => {
-  x.fillStyle = '#c9b27c'; x.fillRect(0, 0, w, h);
-  for (let i = 0; i < 600; i++) { x.fillStyle = `rgba(${100 + Math.random() * 60 | 0},${80 + Math.random() * 50 | 0},50,.12)`; x.fillRect(Math.random() * w, Math.random() * h, 2, 2); }
-  x.strokeStyle = 'rgba(90,70,40,.35)'; x.strokeRect(0, 0, w, h);
-});
-floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping; floorTex.repeat.set(31 * SCALE, 31 * SCALE);
-const crateTex = mkTex((x, w, h) => {
-  x.fillStyle = '#a06f38'; x.fillRect(0, 0, w, h);
-  x.strokeStyle = '#5a3a18'; x.lineWidth = 6; x.strokeRect(3, 3, w - 6, h - 6);
-  x.lineWidth = 3; for (let i = 1; i < 4; i++) { x.beginPath(); x.moveTo(0, i * h / 4); x.lineTo(w, i * h / 4); x.stroke(); }
-  x.beginPath(); x.moveTo(0, 0); x.lineTo(w, h); x.moveTo(w, 0); x.lineTo(0, h); x.stroke();
-});
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(62 * SCALE, 62 * SCALE), new THREE.MeshLambertMaterial({ map: floorTex }));
+// Textures are generated per map theme (applyTheme swaps them in).
+function makeGroundTex(g) {
+  const t = mkTex((x, w, h) => {
+    x.fillStyle = g.base; x.fillRect(0, 0, w, h);
+    if (g.style === 'grass') {
+      for (let i = 0; i < 900; i++) {
+        x.fillStyle = Math.random() < .5 ? `rgba(${60 + Math.random() * 40 | 0},${100 + Math.random() * 60 | 0},${40 + Math.random() * 30 | 0},.35)` : `rgba(${130 + Math.random() * 50 | 0},${150 + Math.random() * 40 | 0},${70 + Math.random() * 30 | 0},.25)`;
+        x.fillRect(Math.random() * w, Math.random() * h, 2, 3);
+      }
+      for (let i = 0; i < 26; i++) { x.fillStyle = 'rgba(120,92,56,.28)'; x.fillRect(Math.random() * w, Math.random() * h, 3, 2); }
+    } else {   // asphalt: speckle, a hairline crack and faint tile edges
+      for (let i = 0; i < 900; i++) { const v = 70 + Math.random() * 50 | 0; x.fillStyle = `rgba(${v},${v + 3},${v + 8},.30)`; x.fillRect(Math.random() * w, Math.random() * h, 2, 2); }
+      x.strokeStyle = 'rgba(15,17,20,.35)'; x.lineWidth = 1; x.beginPath(); let cx = Math.random() * w, cy = Math.random() * h; x.moveTo(cx, cy);
+      for (let i = 0; i < 6; i++) { cx += Math.random() * 30 - 12; cy += Math.random() * 30 - 12; x.lineTo(cx, cy); } x.stroke();
+      x.strokeStyle = 'rgba(255,255,255,.07)'; x.strokeRect(0, 0, w, h);
+    }
+  });
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(31 * SCALE, 31 * SCALE);
+  return t;
+}
+function makeCrateTex(c1, c2) {
+  return mkTex((x, w, h) => {
+    x.fillStyle = c1; x.fillRect(0, 0, w, h);
+    x.strokeStyle = c2; x.lineWidth = 6; x.strokeRect(3, 3, w - 6, h - 6);
+    x.lineWidth = 3; for (let i = 1; i < 4; i++) { x.beginPath(); x.moveTo(0, i * h / 4); x.lineTo(w, i * h / 4); x.stroke(); }
+    x.beginPath(); x.moveTo(0, 0); x.lineTo(w, h); x.moveTo(w, 0); x.lineTo(0, h); x.stroke();
+  });
+}
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(62 * SCALE, 62 * SCALE), new THREE.MeshLambertMaterial({ color: 0xffffff }));
 floor.rotation.x = -Math.PI / 2; scene.add(floor);
-const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 }), crateMat = new THREE.MeshLambertMaterial({ map: crateTex });
+const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 }), crateMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+const wallInMat = new THREE.MeshLambertMaterial({ color: 0xd9c9a0 });                               // interior partitions
+const slabMat = new THREE.MeshLambertMaterial({ color: 0x8a6a45 }), stairMat = new THREE.MeshLambertMaterial({ color: 0x6a4e30 });   // upper floors / stairs
+const indoorMat = new THREE.MeshLambertMaterial({ color: 0x9c6b43, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });   // ground-floor interiors
 const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: .28 });
 const glassMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, transparent: true, opacity: .3, depthWrite: false });
 const roofMat = new THREE.MeshLambertMaterial({ color: 0xa4553b }), roofEdgeMat = new THREE.LineBasicMaterial({ color: 0x3b1f17, transparent: true, opacity: .45 });
@@ -57,10 +76,10 @@ const shieldMat = new THREE.MeshLambertMaterial({ color: 0x6fb8ff, transparent: 
 const bm = [];
 function addBoxMesh(b) {
   const g = new THREE.BoxGeometry(b.w, b.h, b.d);
-  const mat = b.c === 1 ? crateMat : b.c === 2 ? glassMat : b.c === 4 ? barMat : b.c === 5 ? shieldMat : b.rf ? rfMat : wallMat;
+  const mat = b.c === 1 ? crateMat : b.c === 2 ? glassMat : b.c === 4 ? barMat : b.c === 5 ? shieldMat : b.c === 6 ? (b.stair ? stairMat : slabMat) : b.rf ? rfMat : b.int ? wallInMat : wallMat;
   const m = new THREE.Mesh(g, mat); m.position.set(b.x, b.y + b.h / 2, b.z); scene.add(m);
   let e = null;
-  if (b.c !== 2) { e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
+  if (b.c !== 2 && !b.slab) { e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); scene.add(e); }
   bm.push({ m, e });
 }
 function syncWorld() {
@@ -72,7 +91,7 @@ function syncWorld() {
   for (let i = bm.length; i < BOXES.length; i++) addBoxMesh(BOXES[i]);
   for (let i = 0; i < BOXES.length; i++) {
     const b = BOXES[i], v = !b.off; bm[i].m.visible = v; if (bm[i].e) bm[i].e.visible = v;
-    if (b.c === 0) { const mt = b.rf ? rfMat : wallMat; if (bm[i].m.material !== mt) bm[i].m.material = mt; }   // Reinforcer turns a wall grey
+    if (b.c === 0) { const mt = b.rf ? rfMat : b.int ? wallInMat : wallMat; if (bm[i].m.material !== mt) bm[i].m.material = mt; }   // Reinforcer turns a wall grey
   }
 }
 // The static scenery (wall boxes, roofs, site markers) is built from whatever map is loaded and rebuilt when the host
@@ -82,11 +101,23 @@ let builtMap = null;
 function clearMapScene() {
   for (const o of bm) { scene.remove(o.m); o.m.geometry.dispose(); if (o.e) { scene.remove(o.e); o.e.geometry.dispose(); } }
   bm.length = 0;
-  for (const o of mapObjs) { scene.remove(o); o.geometry.dispose(); if (o.material.map) { o.material.map.dispose(); o.material.dispose(); } }
+  for (const o of mapObjs) { scene.remove(o); o.geometry.dispose(); if (o.material.map) { o.material.map.dispose(); o.material.dispose(); } }   // (indoor floors share indoorMat)
   mapObjs.length = 0;
+}
+// Colours, lighting and textures for the loaded map (MAPINFO.theme, defined with the map in data.js).
+function applyTheme(th) {
+  scene.background.setHex(th.sky); scene.fog.color.setHex(th.fog);
+  hemi.color.setHex(th.hemi[0]); hemi.groundColor.setHex(th.hemi[1]); hemi.intensity = th.hemi[2];
+  sun.color.setHex(th.sun[0]); sun.intensity = th.sun[1];
+  wallMat.color.setHex(th.wall); wallInMat.color.setHex(th.wallIn); slabMat.color.setHex(th.slab); stairMat.color.setHex(th.stair);
+  roofMat.color.setHex(th.roof); roofEdgeMat.color.setHex(th.roofEdge); rfMat.color.setHex(th.rf); barMat.color.setHex(th.bar);
+  glassMat.color.setHex(th.glass); indoorMat.color.setHex(th.indoor);
+  const og = floor.material.map; floor.material.map = makeGroundTex(th.ground); floor.material.needsUpdate = true; if (og) og.dispose();
+  const oc = crateMat.map; crateMat.map = makeCrateTex(th.crate[0], th.crate[1]); crateMat.needsUpdate = true; if (oc) oc.dispose();
 }
 function buildMapScene() {
   clearMapScene();
+  applyTheme(MAPINFO.theme);
   for (const b of BOXES) addBoxMesh(b);
   syncWorld();
   // Gabled roofs (render-only): triangular prism along the building's long axis.
@@ -98,6 +129,11 @@ function buildMapScene() {
     const m = new THREE.Mesh(g, roofMat); m.position.set(r.x, r.y, r.z); scene.add(m); mapObjs.push(m);
     const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), roofEdgeMat); e.position.copy(m.position); scene.add(e); mapObjs.push(e);
   }
+  // Ground-floor interiors get their own floor colour (a thin plane just above the ground)
+  for (const bd of BUILDINGS) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(bd.x1 - bd.x0, bd.z1 - bd.z0), indoorMat);
+    m.rotation.x = -Math.PI / 2; m.position.set((bd.x0 + bd.x1) / 2, .03, (bd.z0 + bd.z1) / 2); scene.add(m); mapObjs.push(m);
+  }
   for (const k in SITES) {
     const s = SITES[k];
     const t = mkTex((x, w, h) => {
@@ -105,7 +141,7 @@ function buildMapScene() {
       x.fillStyle = 'rgba(230,60,40,.85)'; x.font = 'bold 120px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(k, w / 2, h / 2 + 6);
     }, 256, 256);
     const m = new THREE.Mesh(new THREE.PlaneGeometry(s.r * 2, s.r * 2), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
-    m.rotation.x = -Math.PI / 2; m.position.set(s.x, .03, s.z); scene.add(m); mapObjs.push(m);
+    m.rotation.x = -Math.PI / 2; m.position.set(s.x, s.y + .06, s.z); scene.add(m); mapObjs.push(m);
   }
   builtMap = MAPINFO.id;
 }
@@ -247,6 +283,7 @@ function addDebris(x, y, z, n, mat = dustMat, spread = 3) {
   }
 }
 let bombMesh = null;
+const bombNear = (p, b) => Math.hypot(p.x - b.x, p.z - b.z) < 2.2 && Math.abs(p.y - (b.y || 0)) < 2.2;   // same storey as the planted bomb
 const snd = id => (W[id] && W[id].snd) || id;   // which existing shot sound an operator gun uses
 
 // ---------------- gadget visuals (smoke, drone, beacon, mine) ----------------
@@ -279,21 +316,21 @@ function mkObj(kind) {
 }
 function syncObjs() {
   const me = meObj(), now = performance.now(), seen = new Set();
-  for (const [k, u, x, z, side, t, armed] of gx.o) {
+  for (const [k, u, x, z, side, t, armed, y] of gx.o) {
     seen.add(u);
     let o = gobjs.get(u);
     if (!o) { o = { kind: k, g: mkObj(k), t, at: now }; gobjs.set(u, o); }
-    o.t = t; o.pos = [x, z]; o.side = side; o.armed = armed;
+    o.t = t; o.pos = [x, z]; o.y = y || 0; o.side = side; o.armed = armed;
   }
   for (const [u, o] of gobjs) if (!seen.has(u)) { scene.remove(o.g); o.g.traverse(c => { if (c.geometry) c.geometry.dispose(); }); gobjs.delete(u); }
   for (const [u, o] of gobjs) {
     const rem = o.t - (now - gx.at) / 1000, ud = o.g.userData, mine = me && o.side === me.team;
-    o.g.position.set(o.pos[0], 0, o.pos[1]);
+    o.g.position.set(o.pos[0], o.y, o.pos[1]);
     if (o.kind === 'smoke') {
       const age = GADGETS.smoke.dur - rem; ud.body.scale.setScalar(Math.min(1, .25 + age * 1.6));
       ud.body.material.opacity = .97 * clamp(rem / 1.2, 0, 1);
     } else if (o.kind === 'drone') {
-      o.g.position.y = 2.6 + Math.sin(now / 260) * .12; for (const r of ud.rot) r.rotation.y = now / 25;
+      o.g.position.y = o.y + 2.6 + Math.sin(now / 260) * .12; for (const r of ud.rot) r.rotation.y = now / 25;
     } else if (o.kind === 'beacon') {
       ud.ring.material.opacity = .22 + .18 * Math.sin(now / 300); ud.led.visible = (now % 900) < 600;
     } else if (o.kind === 'mine') {
@@ -396,10 +433,10 @@ function handle(m) {
     }
     case 'spawn': {
       L.sid = m.sid;
-      for (const [id, x, z, yaw] of m.l) {
+      for (const [id, x, z, yaw, y = 0] of m.l) {
         const p = G.players.get(id); if (!p) continue;
-        p.x = x; p.y = 0; p.z = z; p.yaw = yaw; p.pitch = 0; p.alive = true; p.hp = 100;
-        const e = ents.get(id); if (e) { e.x = x; e.y = 0; e.z = z; }
+        p.x = x; p.y = y; p.z = z; p.yaw = yaw; p.pitch = 0; p.alive = true; p.hp = 100;
+        const e = ents.get(id); if (e) { e.x = x; e.y = y; e.z = z; }
         if (id === G.myId) {
           L.vx = L.vz = L.vy = 0; L.rl = 0; L.scoped = false; L.cd = .3; L.lastHp = 100; L.lastAlive = true; L.spec = null; L.lean = 0; L.ghostPrev = false;
           L.slot = p.prim ? 1 : 2;
@@ -582,7 +619,7 @@ function localUpdate(dt) {
 
     // use (plant / defuse)
     const eligible = rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) ||
-      (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2));
+      (me.team === 'CT' && rs.bomb.s === 'planted' && bombNear(me, rs.bomb)));
     const wantUse = !!keys.KeyF && eligible;
     if (wantUse) { L.useT -= dt; if (L.useT <= 0) { G.send({ t: 'use', on: true }); L.useT = .2; } }
     else if (L.using) G.send({ t: 'use', on: false });
@@ -672,7 +709,7 @@ function fxUpdate(dt) {
       const led = new THREE.Mesh(new THREE.SphereGeometry(.06), new THREE.MeshBasicMaterial({ color: 0xff2020 })); led.position.y = .17; bombMesh.add(led); bombMesh.userData.led = led;
       scene.add(bombMesh);
     }
-    bombMesh.position.set(b.x, .13, b.z);
+    bombMesh.position.set(b.x, (b.y || 0) + .13, b.z);
     bombMesh.userData.led.visible = (performance.now() % 600) < 300;
     L.beepT -= dt;
     if (L.beepT <= 0) { sfx.beep(); L.beepT = .12 + (b.t / 40) * .9; }
@@ -681,21 +718,29 @@ function fxUpdate(dt) {
 
 // ---------------- HUD ----------------
 const mini = $('mini'), mctx = mini.getContext('2d');
+// Minimap of the storey you are on (F1 = ground floor). Things on other storeys are drawn faint; the thin lines are walls
+// (grey = reinforced), dark areas are floor, hatched blocks are stairs, and gaps in walls are doorways or carved holes.
 function drawMini() {
   const me = meObj(); if (!me) return;
+  const th = (MAPINFO.theme && MAPINFO.theme.mini) || ['#5c5238', '#d8c89c', '#6f5a35'];
   const sc = 140 / (62 * SCALE), X = x => (x + 31 * SCALE) * sc, Z = z => (z + 31 * SCALE) * sc;
+  const mf = floorOf(me.y), lo = mf * FH, hi = lo + FH, here = y => floorOf(y) === mf;
   mctx.clearRect(0, 0, 140, 140);
-  mctx.fillStyle = '#5c5238';
-  for (const b of BUILDINGS) mctx.fillRect(X(b.x0), Z(b.z0), (b.x1 - b.x0) * sc, (b.z1 - b.z0) * sc);
-  for (const b of BOXES) if (!b.off && b.c !== 1 && b.c !== 5 && b.bar === undefined && b.y0 < 1) { mctx.fillStyle = b.rf ? '#a9b3c2' : '#d8c89c'; mctx.fillRect(X(b.x0), Z(b.z0), Math.max(1, b.w * sc), Math.max(1, b.d * sc)); }   // walls, grey = reinforced; carved holes and doorways show as gaps
-  mctx.fillStyle = '#6f5a35';
-  for (const b of BOXES) if (b.c === 1) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
+  mctx.fillStyle = th[0];
+  if (mf === 0) for (const b of BUILDINGS) mctx.fillRect(X(b.x0), Z(b.z0), (b.x1 - b.x0) * sc, (b.z1 - b.z0) * sc);
+  else for (const b of BOXES) if (b.slab && !b.off && Math.abs(b.y1 - lo) < .02) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
+  for (const b of BOXES) if (!b.off && b.c !== 1 && b.c !== 5 && b.c !== 6 && b.bar === undefined && b.y1 > lo + 1 && b.y0 < hi - 1) { mctx.fillStyle = b.rf ? '#a9b3c2' : th[1]; mctx.fillRect(X(b.x0), Z(b.z0), Math.max(1, b.w * sc), Math.max(1, b.d * sc)); }   // walls
+  mctx.fillStyle = 'rgba(255,255,255,.35)';
+  for (const b of BOXES) if (b.stair && (Math.abs(b.y0 - lo) < .02 || Math.abs(b.y0 - (lo - FH)) < .02)) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);   // stairs leaving / arriving on this storey
+  mctx.fillStyle = th[2];
+  for (const b of BOXES) if (b.c === 1 && !b.off && Math.abs(b.y0 - lo) < .5) mctx.fillRect(X(b.x0), Z(b.z0), b.w * sc, b.d * sc);
   mctx.fillStyle = '#e8a13a';   // placed barricades
-  for (const b of BOXES) if (b.bar !== undefined && !b.off) mctx.fillRect(X(b.x0), Z(b.z0), Math.max(2, b.w * sc), Math.max(2, b.d * sc));
-  mctx.fillStyle = 'rgba(230,60,40,.9)'; mctx.font = 'bold 12px sans-serif'; mctx.textAlign = 'center';
-  for (const k in SITES) mctx.fillText(k, X(SITES[k].x), Z(SITES[k].z) + 4);
+  for (const b of BOXES) if (b.bar !== undefined && !b.off && Math.abs(b.y0 - lo) < .1) mctx.fillRect(X(b.x0), Z(b.z0), Math.max(2, b.w * sc), Math.max(2, b.d * sc));
+  mctx.font = 'bold 12px sans-serif'; mctx.textAlign = 'center';
+  for (const k in SITES) { mctx.fillStyle = here(SITES[k].y) ? 'rgba(230,60,40,.9)' : 'rgba(230,60,40,.3)'; mctx.fillText(k, X(SITES[k].x), Z(SITES[k].z) + 4); }
   // my side's gadgets (enemy mines are never shown)
-  for (const [k, , x, z, side, , armed] of gx.o) {
+  for (const [k, , x, z, side, , armed, y] of gx.o) {
+    mctx.globalAlpha = here(y || 0) ? 1 : .3;
     if (side !== me.team) { if (k === 'smoke') { mctx.fillStyle = 'rgba(200,200,200,.5)'; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.smoke.r * sc, 0, 7); mctx.fill(); } continue; }
     if (k === 'smoke') { mctx.fillStyle = 'rgba(200,200,200,.5)'; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.smoke.r * sc, 0, 7); mctx.fill(); }
     else if (k === 'drone') { mctx.strokeStyle = '#4fd1ff'; mctx.lineWidth = 1; mctx.beginPath(); mctx.arc(X(x), Z(z), GADGETS.recon.r * sc, 0, 7); mctx.stroke(); mctx.fillStyle = '#4fd1ff'; mctx.fillRect(X(x) - 2, Z(z) - 2, 4, 4); }
@@ -704,14 +749,18 @@ function drawMini() {
   }
   for (const p of G.players.values()) {
     if (!p.alive || p.id === me.id) continue;
+    mctx.globalAlpha = here(p.y) ? 1 : .3;
     if (p.team === me.team) { mctx.fillStyle = p.team === 'T' ? '#f0b050' : '#6fa0ff'; mctx.beginPath(); mctx.arc(X(p.x), Z(p.z), 3, 0, 7); mctx.fill(); }
     else if (gx.set.has(p.id)) { mctx.fillStyle = '#ff3b30'; mctx.strokeStyle = '#fff'; mctx.lineWidth = 1; mctx.beginPath(); mctx.arc(X(p.x), Z(p.z), 3.5, 0, 7); mctx.fill(); mctx.stroke(); }   // revealed by a drone / beacon
   }
   const b = G.rs.bomb;
+  mctx.globalAlpha = b && here(b.y || 0) ? 1 : .3;
   if (b && b.s === 'planted') { mctx.fillStyle = '#f33'; mctx.fillRect(X(b.x) - 3, Z(b.z) - 3, 6, 6); }
+  mctx.globalAlpha = 1;
   const cx = X(me.x), cz = Z(me.z);
   mctx.save(); mctx.translate(cx, cz); mctx.rotate(-me.yaw); mctx.fillStyle = '#fff';
   mctx.beginPath(); mctx.moveTo(0, -6); mctx.lineTo(4, 4); mctx.lineTo(-4, 4); mctx.fill(); mctx.restore();
+  if (BOXES.some(b => b.slab)) { mctx.fillStyle = 'rgba(255,255,255,.85)'; mctx.font = 'bold 11px sans-serif'; mctx.textAlign = 'left'; mctx.fillText('F' + (mf + 1), 4, 13); }
 }
 let lastHud = '';
 function hud(dt) {
@@ -743,7 +792,7 @@ function hud(dt) {
   } else hb.classList.add('hidden');
   // hint
   let hint = null;
-  if (me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && Math.hypot(me.x - rs.bomb.x, me.z - rs.bomb.z) < 2.2))) hint = `Hold F to ${me.team === 'T' ? 'plant' : 'defuse'}`;
+  if (me.alive && rs.phase === 'live' && ((me.team === 'T' && rs.bomb.s === 'none' && inSite(me)) || (me.team === 'CT' && rs.bomb.s === 'planted' && bombNear(me, rs.bomb)))) hint = `Hold F to ${me.team === 'T' ? 'plant' : 'defuse'}`;
   else if (me.alive && rs.phase === 'freeze' && me.team === 'CT' && !opsOpen) {
     const di = nearDoor(me);
     if (di !== null) {
