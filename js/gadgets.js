@@ -7,9 +7,10 @@
 // World state: H.objs (smoke, drone, beacon, mine), H.marks (enemies revealed to a side), shields are real boxes (see data.js).
 // Everything is broadcast to clients in one small 'gs' message (4 Hz, plus immediately after any change).
 import { G } from './state.js';
-import { GADGETS, PREP_GADGETS, BOXES, DOORS, SMOKES, SCALE, castWorldBox, losClear, blockedAt, shieldRect } from './data.js';
+import { GADGETS, PREP_GADGETS, BOXES, DOORS, SMOKES, SCALE, FH, floorOf, castWorldBox, losClear, blockedAt, shieldRect } from './data.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fyOf = p => floorOf(p.y) * FH;   // floor height of the storey a player stands on: placed gadgets sit on that floor
 
 export function createGadgets(ctx) {
   const { H, list, bcast, worldEvent, inflict, tell } = ctx;
@@ -23,7 +24,7 @@ export function createGadgets(ctx) {
     bcast({
       t: 'gs',
       p: list().map(p => [p.id, p.gch | 0, +(p.gcd || 0).toFixed(1), +(p.gact || 0).toFixed(1), +(p.gbar || 0).toFixed(1), flags(p)]),
-      o: H.objs.map(o => [o.k, o.u, +o.x.toFixed(1), +o.z.toFixed(1), o.side, +Math.min(9999, Math.max(0, o.t)).toFixed(1), o.k === 'mine' && o.armT > 0 ? 1 : 0]),
+      o: H.objs.map(o => [o.k, o.u, +o.x.toFixed(1), +o.z.toFixed(1), o.side, +Math.min(9999, Math.max(0, o.t)).toFixed(1), o.k === 'mine' && o.armT > 0 ? 1 : 0, +(o.y || 0).toFixed(2)]),
       mk: [...H.marks].map(([id, m]) => [id, m.side]),
     });
   }
@@ -50,17 +51,17 @@ export function createGadgets(ctx) {
     const a = aim(p, m);
     if (Number.isFinite(m.d)) {
       const d = clamp(m.d, 0, maxd);
-      return { a, bi: -1, t: d, x: a.ox - Math.sin(a.yaw) * d, y: 0, z: a.oz - Math.cos(a.yaw) * d, hx: -Math.sin(a.yaw), hz: -Math.cos(a.yaw), wall: false };
+      return { a, bi: -1, t: d, x: a.ox - Math.sin(a.yaw) * d, y: fyOf(p), z: a.oz - Math.cos(a.yaw) * d, hx: -Math.sin(a.yaw), hz: -Math.cos(a.yaw), wall: false };
     }
     const r = castWorldBox(a.ox, a.oy, a.oz, a.dx, a.dy, a.dz, maxd), hh = Math.hypot(a.dx, a.dz) || 1;
     return { a, bi: r.bi, t: r.t, x: a.ox + a.dx * r.t, y: a.oy + a.dy * r.t, z: a.oz + a.dz * r.t, hx: a.dx / hh, hz: a.dz / hh, wall: r.bi >= 0 };
   }
   // A floor spot for a placed gadget: step back from walls until the spot is free. null = no room.
-  function floorSpot(pt) {
+  function floorSpot(pt, fy = 0) {
     let x = pt.x, z = pt.z;
     if (pt.wall) { x -= pt.hx * .7; z -= pt.hz * .7; }
     for (let i = 0; i < 8; i++) {
-      if (!blockedAt(x, z)) return [x, z];
+      if (!blockedAt(x, z, fy)) return [x, z];
       x -= pt.hx * .5; z -= pt.hz * .5;
     }
     return null;
@@ -95,7 +96,7 @@ export function createGadgets(ctx) {
       case 'smoke': {
         const pt = pointAt(p, m, g.throwD);
         const x = pt.x - (pt.wall ? pt.hx * 1.0 : 0), z = pt.z - (pt.wall ? pt.hz * 1.0 : 0);
-        const o = addObj({ k: 'smoke', x, z, r: g.r, t: g.dur, side: p.team, owner: p.id });
+        const o = addObj({ k: 'smoke', x, y: fyOf(p), z, r: g.r, t: g.dur, side: p.team, owner: p.id });
         SMOKES.push(o); spend(p, g); gfx('smoke', x, z, p.id);
         return true;
       }
@@ -125,16 +126,16 @@ export function createGadgets(ctx) {
       case 'recon': {
         const pt = pointAt(p, m, g.throwD);
         const x = pt.x - (pt.wall ? pt.hx * 1.0 : 0), z = pt.z - (pt.wall ? pt.hz * 1.0 : 0);
-        addObj({ k: 'drone', x, z, t: g.dur, side: p.team, owner: p.id });
+        addObj({ k: 'drone', x, y: fyOf(p), z, t: g.dur, side: p.team, owner: p.id });
         spend(p, g); gfx('drone', x, z, p.id);
         return true;
       }
       case 'shield': {
         const a = aim(p, m), alongX = Math.abs(Math.cos(a.yaw)) >= Math.abs(Math.sin(a.yaw));   // panel faces the way you look (snapped to an axis)
-        const x = p.x - Math.sin(a.yaw) * 2.4, z = p.z - Math.cos(a.yaw) * 2.4, rc = shieldRect(x, z, alongX);
-        for (const b of BOXES) if (!b.off && b.y0 < 2 && b.x1 > rc.x0 && b.x0 < rc.x1 && b.z1 > rc.z0 && b.z0 < rc.z1) { deny(p, 'No room for a shield here'); return false; }
-        for (const q of list()) if (q.alive && q.x > rc.x0 - .5 && q.x < rc.x1 + .5 && q.z > rc.z0 - .5 && q.z < rc.z1 + .5) { deny(p, 'Someone is in the way'); return false; }
-        worldEvent({ k: 'shield', u: ++H.shUid, x: +x.toFixed(2), z: +z.toFixed(2), ax: alongX ? 1 : 0 });
+        const x = p.x - Math.sin(a.yaw) * 2.4, z = p.z - Math.cos(a.yaw) * 2.4, rc = shieldRect(x, z, alongX), fy = fyOf(p);
+        for (const b of BOXES) if (!b.off && b.y0 < fy + 2 && b.y1 > fy + .1 && b.x1 > rc.x0 && b.x0 < rc.x1 && b.z1 > rc.z0 && b.z0 < rc.z1) { deny(p, 'No room for a shield here'); return false; }
+        for (const q of list()) if (q.alive && Math.abs(q.y - fy) < 2.5 && q.x > rc.x0 - .5 && q.x < rc.x1 + .5 && q.z > rc.z0 - .5 && q.z < rc.z1 + .5) { deny(p, 'Someone is in the way'); return false; }
+        worldEvent({ k: 'shield', u: ++H.shUid, x: +x.toFixed(2), y: +fy.toFixed(2), z: +z.toFixed(2), ax: alongX ? 1 : 0 });
         spend(p, g); gfx('shield', x, z, p.id);
         return true;
       }
@@ -147,9 +148,9 @@ export function createGadgets(ctx) {
         return true;
       }
       case 'beacon': case 'mine': {
-        const pt = pointAt(p, m, g.throwD), spot = floorSpot(pt);
+        const pt = pointAt(p, m, g.throwD), spot = floorSpot(pt, fyOf(p));
         if (!spot) { deny(p, 'No room here'); return false; }
-        const base = { x: spot[0], z: spot[1], t: 9999, side: p.team, owner: p.id };
+        const base = { x: spot[0], y: fyOf(p), z: spot[1], t: 9999, side: p.team, owner: p.id };
         if (p.gad === 'beacon') addObj({ ...base, k: 'beacon', in: new Set() });
         else addObj({ ...base, k: 'mine', armT: 1 });
         spend(p, g); gfx(p.gad === 'beacon' ? 'beaconset' : 'mineset', spot[0], spot[1], p.id);
@@ -157,7 +158,7 @@ export function createGadgets(ctx) {
       }
       case 'fortify': {
         if (p.fort) { p.fort = false; p.gcd = g.cd; dirty = true; gfx('unfort', p.x, p.z, p.id); return true; }
-        if (p.y > .3) return false;                                   // only on the ground
+        if (p.y - fyOf(p) > .3) return false;                         // only standing on a floor, not in the air
         p.fort = true; p.gcd = g.cd; dirty = true; gfx('fort', p.x, p.z, p.id);
         return true;
       }
@@ -188,19 +189,19 @@ export function createGadgets(ctx) {
         if (o.k === 'drone') {
           for (const e of list()) {
             if (!e.alive || e.team === o.side || Math.hypot(e.x - o.x, e.z - o.z) > g.r) continue;
-            if (losClear(o.x, 2.6, o.z, e.x, e.y + 1.2, e.z)) mark(e, o.side, 1.4);
+            if (losClear(o.x, (o.y || 0) + 2.6, o.z, e.x, e.y + 1.2, e.z)) mark(e, o.side, 1.4);
           }
         } else if (o.k === 'beacon') {
           for (const e of list()) {
             if (!e.alive || e.team === o.side) { o.in.delete(e.id); continue; }
-            const inside = Math.hypot(e.x - o.x, e.z - o.z) < g.r && e.y < 2.5;
+            const inside = Math.hypot(e.x - o.x, e.z - o.z) < g.r && e.y - (o.y || 0) < 2.5 && e.y - (o.y || 0) > -.8;
             if (inside && !o.in.has(e.id)) { o.in.add(e.id); mark(e, o.side, g.mark); gfx('ping', o.x, o.z, e.id); dirty = true; }
             else if (!inside) o.in.delete(e.id);
           }
         } else if (o.k === 'mine') {
           if (o.armT > 0) { o.armT -= dt; if (o.armT <= 0) dirty = true; continue; }
           for (const e of list()) {
-            if (!e.alive || e.team === o.side || e.y > 1.3 || Math.hypot(e.x - o.x, e.z - o.z) > g.r) continue;
+            if (!e.alive || e.team === o.side || e.y - (o.y || 0) > 1.3 || e.y - (o.y || 0) < -.8 || Math.hypot(e.x - o.x, e.z - o.z) > g.r) continue;
             rmObj(o); gfx('mine', o.x, o.z, e.id);
             inflict(e, G.players.get(o.owner) || null, g.dmg, 'mine', 0, { pierce: true });
             e.slow = g.slow; mark(e, o.side, 2); dirty = true;
@@ -257,13 +258,13 @@ export function createGadgets(ctx) {
             const w = BOXES[i]; if (w.off || !w.brk || w.rf) continue;
             const cx = clamp(ex, w.x0, w.x1), cz = clamp(ez, w.z0, w.z1), d = Math.hypot(cx - ex, cz - ez);
             if (d >= bd) continue;
-            const dx = cx - ex, dy = 1.5 - ey, dz = cz - ez, L = Math.hypot(dx, dy, dz) || 1;
+            const dx = cx - ex, dy = (b.y + 1.5) - ey, dz = cz - ez, L = Math.hypot(dx, dy, dz) || 1;
             if (castWorldBox(ex, ey, ez, dx / L, dy / L, dz / L, 10).bi === i) { best = i; bd = d; }
           }
           if (best >= 0) {
             const w = BOXES[best], cx = clamp(ex, w.x0, w.x1), cz = clamp(ez, w.z0, w.z1), dx = cx - ex, dz = cz - ez;
             b.yaw = Math.atan2(-dx, -dz);
-            use(b, { yaw: b.yaw, pitch: Math.atan2(1.5 - ey, Math.hypot(dx, dz)) });
+            use(b, { yaw: b.yaw, pitch: Math.atan2((b.y + 1.5) - ey, Math.hypot(dx, dz)) });
           }
         }
         break;
