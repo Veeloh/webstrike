@@ -3,7 +3,7 @@
 // Internal team ids: 'T' = Attack, 'CT' = Defense. A team id is the *side* a player is on right now.
 // Players also belong to a squad (p.sq = 0 or 1) that stays together and swaps sides every SWAP_EVERY rounds.
 import { G } from './state.js';
-import { W, OPS, OPS_BY_SIDE, GADGETS, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, smokeCut, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld, MAPS, MAPINFO, loadMap, watchPoint } from './data.js';
+import { W, OPS, OPS_BY_SIDE, GADGETS, DOORS, BOXES, SPAWNS, SITES, ROUTES, HOLDS, HS_MULT, SCALE, moveE, castWorld, rayPlayer, losClear, smokeCut, inSite, segClear, navPath, blockedAt, applyWorld, resetWorld, MAPS, MAPINFO, loadMap, watchPoint, floorOf, FH } from './data.js';
 import { createGadgets } from './gadgets.js';
 
 export const FREEZE = 20, ROUND = 105, ENDT = 5.5, PLANT = 3.2, BOMBT = 40, MAXR = 8, SWAP_EVERY = 3;
@@ -13,7 +13,7 @@ const WALL_HP = 240, BAR_HP = 120;   // wall damage needed to carve a hole / bre
 export const MAX_BARR = 6;           // barricades defenders may place per round
 export const H = {
   phase: 'freeze', t: FREEZE, round: 1, sc: [0, 0], sq1: 'T', sid: 0, over: false,   // sc = squad scores, sq1 = the side squad 0 is on
-  bomb: { s: 'none', x: 0, z: 0, t: 0 }, holds: {}, botsOn: true, size: 5, nextBot: 1, headless: false,
+  bomb: { s: 'none', x: 0, y: 0, z: 0, t: 0 }, holds: {}, botsOn: true, size: 5, nextBot: 1, headless: false,
   plan: 'A', acc: { rs: 0, snap: 0, meta: 0 },
   log: [], whp: new Map(),                 // world events this round (replayed to late joiners), wall hit points left
 };
@@ -92,7 +92,7 @@ function sendRS() {
   const hid = Object.keys(H.holds)[0], h = hid ? H.holds[hid] : null;
   let hold = null;
   if (h) hold = { id: hid, type: h.type, p: h.p, need: h.type === 'plant' ? PLANT : DEFUSE };
-  bcast({ t: 'rs', phase: H.phase, tm: Math.max(0, H.t), round: H.round, sT: scoreOn('T'), sCT: scoreOn('CT'), sc: H.sc, sq1: H.sq1, over: H.over, bomb: { s: H.bomb.s, x: H.bomb.x, z: H.bomb.z, t: Math.max(0, H.bomb.t) }, hold });
+  bcast({ t: 'rs', phase: H.phase, tm: Math.max(0, H.t), round: H.round, sT: scoreOn('T'), sCT: scoreOn('CT'), sc: H.sc, sq1: H.sq1, over: H.over, bomb: { s: H.bomb.s, x: H.bomb.x, y: H.bomb.y || 0, z: H.bomb.z, t: Math.max(0, H.bomb.t) }, hold });
 }
 function sendSnap() {
   bcast({ t: 'snap', e: list().map(p => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.yaw.toFixed(3), +p.pitch.toFixed(3), p.w, p.crouch ? 1 : 0, +(p.lean || 0).toFixed(2)]) });
@@ -121,7 +121,7 @@ function damageWall(i, dmg, x, y, z) {
 // ---------- rounds ----------
 function spawnOne(p, i) {
   const arr = SPAWNS[p.team], s = arr[i % arr.length];
-  p.x = s[0]; p.y = 0; p.z = s[1]; p.yaw = s[2]; p.pitch = 0; p.hp = 100; p.alive = true; p.crouch = 0;
+  p.x = s[0]; p.y = s[3] || 0; p.vy = 0; p.z = s[1]; p.yaw = s[2]; p.pitch = 0; p.hp = 100; p.alive = true; p.crouch = 0;
   p.w = p.prim || p.sec;
   if (p.isBot) botInit(p);
 }
@@ -129,7 +129,7 @@ function startRound() {
   // Every SWAP_EVERY rounds the squads trade sides. Everybody's operator resets to one of the new side (they pick again in prep).
   const swap = H.round > 1 && (H.round - 1) % SWAP_EVERY === 0;
   if (swap) { H.sq1 = H.sq1 === 'T' ? 'CT' : 'T'; for (const p of list()) { p.team = sideOf(p.sq); p.op = null; } }
-  H.phase = 'freeze'; H.t = FREEZE; H.bomb = { s: 'none', x: 0, z: 0, t: 0 }; H.holds = {}; H.sid++; gad.resetRound();
+  H.phase = 'freeze'; H.t = FREEZE; H.bomb = { s: 'none', x: 0, y: 0, z: 0, t: 0 }; H.holds = {}; H.sid++; gad.resetRound();
   H.plan = Math.random() < .5 ? 'A' : 'B';
   H.log = []; H.whp = new Map(); resetWorld();   // walls whole, barricades off
   const idx = { T: 0, CT: 0 };
@@ -140,7 +140,7 @@ function startRound() {
   }
   bcast({ t: 'world', ev: [{ k: 'reset' }] });
   sendMeta();                                  // before 'spawn' so clients already know their new side and loadout
-  bcast({ t: 'spawn', sid: H.sid, swap: swap ? 1 : 0, l: list().map(p => [p.id, p.x, p.z, p.yaw]) });
+  bcast({ t: 'spawn', sid: H.sid, swap: swap ? 1 : 0, l: list().map(p => [p.id, p.x, p.z, p.yaw, p.y]) });
   const final = H.sc[0] === MAXR - 1 && H.sc[1] === MAXR - 1;
   bcast({ t: 'msg', text: swap ? 'SIDES SWAP' : final ? 'FINAL ROUND — prep phase (B: operator)' : `${H.round === 1 ? MAPINFO.name + ' — ' : ''}Round ${H.round} — prep phase (B: operator)`, short: swap ? 0 : 1, swap: swap ? 1 : 0 });
   sendRS(); gad.sendGS();
@@ -210,6 +210,8 @@ function inflict(v, a, dmg, wid, hs = 0, o = {}) {
 }
 
 // ---------- plant / defuse ----------
+// Within r of the planted bomb on the same storey (a bomb upstairs cannot be defused from the room below).
+const nearBomb = (p, r) => Math.hypot(p.x - H.bomb.x, p.z - H.bomb.z) <= r && Math.abs((p.y || 0) - (H.bomb.y || 0)) < 2.2;
 function startHold(p, type) {
   if (!p.alive || H.phase !== 'live') return false;
   if (H.holds[p.id]) return true;
@@ -217,7 +219,7 @@ function startHold(p, type) {
     if (p.team !== 'T' || H.bomb.s !== 'none' || !inSite(p)) return false;
     if (Object.values(H.holds).some(h => h.type === 'plant')) return false;
   } else {
-    if (p.team !== 'CT' || H.bomb.s !== 'planted' || Math.hypot(p.x - H.bomb.x, p.z - H.bomb.z) > 2.2) return false;
+    if (p.team !== 'CT' || H.bomb.s !== 'planted' || !nearBomb(p, 2.2)) return false;
     if (Object.values(H.holds).some(h => h.type === 'defuse')) return false;
   }
   if (p.fort) return false;                       // Fortify Mode locks you in place
@@ -236,7 +238,7 @@ function holdsTick(dt) {
     if (h.p >= need) {
       delete H.holds[id];
       if (h.type === 'plant') {
-        H.bomb = { s: 'planted', x: p.x, z: p.z, t: BOMBT };
+        H.bomb = { s: 'planted', x: p.x, y: floorOf(p.y) * FH, z: p.z, t: BOMBT };   // the bomb sits on the floor of the storey it was planted on
         bcast({ t: 'msg', text: 'The bomb has been planted', short: 1 }); sendRS();
       } else { H.bomb.s = 'defused'; endRound('CT', 'Bomb defused'); }
     }
@@ -250,20 +252,32 @@ function botInit(b) {
   if (b.team === 'T') {
     const site = Math.random() < .75 ? H.plan : (H.plan === 'A' ? 'B' : 'A');
     const routes = ROUTES[site], route = routes[Math.random() * routes.length | 0];
-    a.path = route.map(q => [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1)]);
+    a.path = jitterPath(route);
   } else {
-    const r = Math.random(), k = r < .35 ? 'A' : r < .7 ? 'B' : 'M';
-    a.path = HOLDS[k].map(q => [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1)]);
+    const r = Math.random(), k = r < .35 ? 'A' : r < .7 ? 'B' : 'M', hold = HOLDS[k];
+    // defenders may spawn on another storey than their hold route starts on: walk (via the stairs) to its first point
+    a.path = jitterPath([...navPath(b.x, b.z, b.y, hold[0][0], hold[0][1], hold[0][2]), ...hold.slice(1)]);
   }
   a.home = a.path[a.path.length - 1];
 }
-// Next point to steer toward on the way to (gx,gz): straight there if the way is clear, otherwise along the nav graph.
-function steer(b, a, gx, gz, dt) {
-  if (segClear(b.x, b.z, gx, gz)) { a.nav = null; return [gx, gz]; }
+// Route points get a little random offset so a squad does not walk in single file, except around staircases (which are narrow).
+function jitterPath(pts) {
+  return pts.map((q, i) => {
+    const edge = (pts[i - 1] && pts[i - 1][2] !== q[2]) || (pts[i + 1] && pts[i + 1][2] !== q[2]);
+    return edge ? [q[0], q[1], q[2]] : [q[0] + rnd(-1, 1), q[1] + rnd(-1, 1), q[2]];
+  });
+}
+// Has the bot reached waypoint wp = [x, z, floorHeight]? (Being right below / above it on another storey does not count.)
+const reached = (b, wp, r) => Math.hypot(wp[0] - b.x, wp[1] - b.z) < r && Math.abs((wp[2] || 0) - b.y) < 1.2;
+// Next point to steer toward on the way to (gx,gz) on floor height gy: straight there if it is on this storey and the way is
+// clear, otherwise along the nav graph (which knows about the staircases).
+function steer(b, a, gx, gz, dt, gy = 0) {
+  const fb = floorOf(b.y), fg = floorOf(gy);
+  if (fb === fg && segClear(b.x, b.z, gx, gz, fb * FH)) { a.nav = null; return [gx, gz]; }
   let n = a.nav;
   if (n) n.age += dt;
-  if (!n || n.age > 1.5 || Math.hypot(n.gx - gx, n.gz - gz) > 3) n = a.nav = { gx, gz, pts: navPath(b.x, b.z, gx, gz), i: 0, age: 0 };
-  while (n.i < n.pts.length - 1 && Math.hypot(n.pts[n.i][0] - b.x, n.pts[n.i][1] - b.z) < 1.8) n.i++;
+  if (!n || n.age > 1.5 || n.gf !== fg || Math.hypot(n.gx - gx, n.gz - gz) > 3) n = a.nav = { gx, gz, gf: fg, pts: navPath(b.x, b.z, b.y, gx, gz, gy), i: 0, age: 0 };
+  while (n.i < n.pts.length - 1 && Math.hypot(n.pts[n.i][0] - b.x, n.pts[n.i][1] - b.z) < 1.8 && Math.abs(n.pts[n.i][2] - b.y) < 1.2) n.i++;
   return n.pts[n.i];
 }
 function trace(sh, ox, oy, oz, dx, dy, dz, range) {
@@ -299,7 +313,7 @@ function botFire(b, tgt, dist) {
 function barrierAhead(b, mx, mz) {
   const l = Math.hypot(mx, mz) || 1; let best = -1, bd = 3.5;
   for (let i = 0; i < DOORS.length; i++) {
-    const d = DOORS[i]; if (BOXES[d.bi].off) continue;
+    const d = DOORS[i]; if (BOXES[d.bi].off || Math.abs(d.y - floorOf(b.y) * FH) > .1) continue;
     const dx = d.x - b.x, dz = d.z - b.z, dist = Math.hypot(dx, dz);
     if (dist < bd && (dx * mx + dz * mz) / ((dist * l) || 1) > .2) { bd = dist; best = i; }
   }
@@ -313,8 +327,8 @@ function botBreach(b, a, dt) {
   b.yaw = turn(b.yaw, ty, 10 * dt);
   if (a.cd <= 0 && Math.abs(angDiff(ty, b.yaw)) < .15) {
     const wid = b.prim || b.sec, w = W[wid];
-    bcast({ t: 'shot', id: b.id, w: wid, x: b.x, y: b.y + 1.55, z: b.z, tx: d.x, ty: 1.2, tz: d.z });
-    damageWall(d.bi, w.dmg * (w.pellets || 1) * .8, d.x, 1.2, d.z);
+    bcast({ t: 'shot', id: b.id, w: wid, x: b.x, y: b.y + 1.55, z: b.z, tx: d.x, ty: d.y + 1.2, tz: d.z });
+    damageWall(d.bi, w.dmg * (w.pellets || 1) * .8, d.x, d.y + 1.2, d.z);
     a.cd = w.delay * (w.auto ? 1 : 1.5) + .05;
   }
   return true;
@@ -356,10 +370,11 @@ function botThink(b, dt) {
     // planted bomb for defenders) while shooting, instead of freezing in place trading fire across the map.
     if (bd > 14 * SCALE) {
       let ax = null, az = null;
-      if (b.team === 'CT' && H.bomb.s === 'planted') [ax, az] = steer(b, a, H.bomb.x, H.bomb.z, dt);
+      if (b.team === 'CT' && H.bomb.s === 'planted') [ax, az] = steer(b, a, H.bomb.x, H.bomb.z, dt, H.bomb.y);
       else if (H.bomb.s !== 'planted' && a.path[a.pi]) {
-        ax = a.path[a.pi][0]; az = a.path[a.pi][1];
-        if (Math.hypot(ax - b.x, az - b.z) < 1.3) a.pi++;
+        const wp = a.path[a.pi];
+        [ax, az] = steer(b, a, wp[0], wp[1], dt, wp[2]);
+        if (reached(b, wp, 1.3)) a.pi++;
       }
       if (ax != null) { const dx = ax - b.x, dz = az - b.z, d = Math.hypot(dx, dz) || 1; mvx = dx / d; mvz = dz / d; want = true; speed = 3.4; }
     }
@@ -369,21 +384,21 @@ function botThink(b, dt) {
     const bm = H.bomb;
     if (bm.s === 'planted') {
       if (b.team === 'CT') {
-        if (Math.hypot(bm.x - b.x, bm.z - b.z) < 1.6) startHold(b, 'defuse');
-        else [gx, gz] = steer(b, a, bm.x, bm.z, dt);
+        if (nearBomb(b, 1.6)) startHold(b, 'defuse');
+        else [gx, gz] = steer(b, a, bm.x, bm.z, dt, bm.y);
       } else {
         if (!a.guard) {
           for (let k = 0; k < 10; k++) {
             const ang = Math.random() * 6.28, r = 3 + Math.random() * 4;
             a.guard = [bm.x + Math.cos(ang) * r, bm.z + Math.sin(ang) * r];
-            if (!blockedAt(a.guard[0], a.guard[1]) && segClear(bm.x, bm.z, a.guard[0], a.guard[1])) break;
+            if (!blockedAt(a.guard[0], a.guard[1], bm.y) && segClear(bm.x, bm.z, a.guard[0], a.guard[1], bm.y)) break;
           }
         }
-        if (Math.hypot(a.guard[0] - b.x, a.guard[1] - b.z) >= 1.5) [gx, gz] = steer(b, a, a.guard[0], a.guard[1], dt);
+        if (Math.hypot(a.guard[0] - b.x, a.guard[1] - b.z) >= 1.5 || Math.abs(bm.y - b.y) > 1.5) [gx, gz] = steer(b, a, a.guard[0], a.guard[1], dt, bm.y);
       }
     } else {
       const wp = a.path[a.pi];
-      if (wp) { gx = wp[0]; gz = wp[1]; if (Math.hypot(gx - b.x, gz - b.z) < 1.3) a.pi++; }
+      if (wp) { [gx, gz] = steer(b, a, wp[0], wp[1], dt, wp[2]); if (reached(b, wp, 1.3)) a.pi++; }
       else if (b.team === 'T' && bm.s === 'none' && inSite(b) && !Object.values(H.holds).some(h => h.type === 'plant')) { startHold(b, 'plant'); }
       else {
         a.wt -= dt;
@@ -411,6 +426,10 @@ function botThink(b, dt) {
   if (a.unst > 0) { a.unst -= dt; const c = Math.cos(a.ua), s = Math.sin(a.ua); const nx = mvx * c - mvz * s, nz = mvx * s + mvz * c; mvx = nx; mvz = nz; want = true; }
   speed *= (b.slow > 0 ? GADGETS.mine.slowMul : 1) * (b.gact > 0 ? GADGETS.rush.speedMul : 1) * (b.ghost ? 1.1 : 1);
   if (want && !H.holds[b.id] && H.phase === 'live') moveE(b, mvx * speed * dt, 0, mvz * speed * dt, 1.75);
+  // gravity: bots settle on stair steps and floor slabs, and fall if they step into a stairwell opening
+  b.vy = (b.vy || 0) - 20 * dt;
+  const gf = moveE(b, 0, b.vy * dt, 0, 1.75);
+  if (gf & 1) b.vy = 0; else if ((gf & 2) && b.vy > 0) b.vy = 0;
   b.w = b.ghost ? 'knife' : (b.prim || b.sec);
 }
 
@@ -451,7 +470,7 @@ export function onMsg(from, m) {
       if (first && H.headless) { startMatch(); break; }
       if (H.phase === 'freeze') {
         spawnOne(np, list().filter(q => q.alive && q.team === team).length);
-        bcast({ t: 'spawn', sid: H.sid, l: [[np.id, np.x, np.z, np.yaw]] });
+        bcast({ t: 'spawn', sid: H.sid, l: [[np.id, np.x, np.z, np.yaw, np.y]] });
       }
       sendMeta(); sendRS();
       break;
